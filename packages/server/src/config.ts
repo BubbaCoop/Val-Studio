@@ -19,6 +19,13 @@ export interface StudioConfig {
   runner: "stub" | "agent-sdk";
   /** Fail startup when the preflight fails. Off only for tests. */
   strictPreflight: boolean;
+  /**
+   * Repo-relative directory of tracked reference runs, listed alongside the live ones
+   * and always READ-ONLY. There is no val.config.schema.json field for this — it is
+   * Studio's convention, not the pipeline's — so it is Studio configuration. Set it
+   * empty to list nothing but the live runs.
+   */
+  fixturesDir: string;
 }
 
 function flag(name: string): string | undefined {
@@ -49,5 +56,6 @@ export function loadConfig(): StudioConfig {
     host: flag("host") ?? process.env.HOST ?? "127.0.0.1",
     runner,
     strictPreflight: (flag("strict-preflight") ?? process.env.VAL_STUDIO_STRICT_PREFLIGHT ?? "1") !== "0",
+    fixturesDir: flag("fixtures") ?? process.env.VAL_STUDIO_FIXTURES_DIR ?? "val/fixtures",
   };
 }

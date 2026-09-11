@@ -6,6 +6,7 @@
  */
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import type { RunFileEvent } from "@valiify/studio-shared";
 
 export const RUN_FILES = {
   manifest: "manifest.json",
@@ -31,7 +32,7 @@ export const PATTERNS = {
 } as const;
 
 /** Classify a run-relative path into the artefact class the SSE channel reports. */
-export function classify(rel: string): string | undefined {
+export function classify(rel: string): RunFileEvent["artefact"] {
   const p = rel.replace(/\\/g, "/");
   if (p === RUN_FILES.manifest) return "manifest";
   if (p === RUN_FILES.brief) return "brief";

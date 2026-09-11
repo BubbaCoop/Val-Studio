@@ -1,28 +1,53 @@
 /**
- * Handoff — contract.json, after VERIFY: PASS.
+ * Handoff — the package, after VERIFY: PASS.
  *
- * Renders the seven groups the contract schema defines and nothing else: blocks,
- * fields, states, actions, copy, icons, planned. The contract is the machine-readable
- * half of the package, so it is shown as it is, not summarised into prose.
+ * contract.json is rendered as the seven groups the contract schema defines and
+ * nothing else: blocks, fields, states, actions, copy, icons, planned. It is the
+ * machine-readable half of the package, so it is shown as it is, never summarised
+ * into prose. Beside it: the package's own file list, and HANDOFF.md — the document
+ * the dev team actually receives — read verbatim off disk.
  */
+import { useEffect, useState } from "react";
 import type { DesignContract, RunDetail } from "@valiify/studio-shared";
-import { Empty, Panel, Tag } from "../components/ui.tsx";
+import { api } from "../api.ts";
+import { Banner, Empty, Panel, Tag, Verbatim } from "../components/ui.tsx";
 
 export function Handoff({ run }: { run: RunDetail }) {
   const c = run.contract;
-  if (!c) return <Panel title="Handoff"><Empty>No 05-package/contract.json yet.</Empty></Panel>;
+  const verified = run.verifications.at(-1)?.verdict === "PASS";
+
+  if (!c) {
+    return (
+      <Panel title="Handoff">
+        {run.packageFiles.length > 0 ? (
+          <Banner tone="blocking" title="05-package/ exists but carries no readable contract.json">
+            handoff-check validates the package against tools/design/contract.schema.json, so a package without a
+            readable contract has not passed Gate 6. The files that are there are listed below.
+          </Banner>
+        ) : (
+          <Empty>No 05-package/ yet — the build has not run.</Empty>
+        )}
+        {run.packageFiles.length > 0 && <PackageFiles files={run.packageFiles} />}
+      </Panel>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">
       <Panel
         title="Contract"
         right={
-          <span className="font-mono text-[10px] text-ink-3">
-            {run.verifications.at(-1)?.verdict === "PASS" ? "VERIFY: PASS" : "not yet verified"}
-          </span>
+          <Tag tone={verified ? "ok" : "draft"}>
+            {verified ? `VERIFY: PASS · ${run.verifications.at(-1)!.fileName}` : "not yet verified"}
+          </Tag>
         }
       >
-        <div className="flex flex-wrap items-center gap-2">
+        {!verified && (
+          <Banner tone="draft" title="This package has not reported VERIFY: PASS">
+            The contract below is what the builder wrote. Gate 6 has not signed it off, so treat it as in flight.
+          </Banner>
+        )}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
           <Tag>{c.route}</Tag>
           <Tag>{c.archetype}</Tag>
           {c.surface && <Tag>{c.surface}</Tag>}
@@ -73,7 +98,50 @@ export function Handoff({ run }: { run: RunDetail }) {
           swaps these when it does.
         </p>
       </Panel>
+
+      <Panel title="Package" right={<Tag>{run.packageFiles.length} files</Tag>}>
+        <PackageFiles files={run.packageFiles} />
+      </Panel>
+
+      {/* The documents the dev team receives, verbatim. Studio renders, never rewrites. */}
+      <RunFile run={run} path="05-package/HANDOFF.md" title="HANDOFF.md" />
+      <RunFile run={run} path="05-package/mapping.md" title="mapping.md" />
+      {run.writeup && (
+        <Panel title="07-writeup.md" right={<Tag tone="ok">signed off</Tag>}>
+          <Verbatim text={run.writeup} />
+        </Panel>
+      )}
     </div>
+  );
+}
+
+function PackageFiles({ files }: { files: string[] }) {
+  if (!files.length) return <Empty>None.</Empty>;
+  return (
+    <ul className="flex flex-col gap-0.5 font-mono text-[10px] text-ink-2">
+      {files.map((f) => <li key={f}>{f}</li>)}
+    </ul>
+  );
+}
+
+/** One file out of the run directory, rendered verbatim. */
+function RunFile({ run, path, title }: { run: RunDetail; path: string; title: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const present = run.packageFiles.includes(path.replace("05-package/", ""));
+
+  useEffect(() => {
+    if (!present) return;
+    setError(null);
+    api.file(run.runId, path).then(setText).catch((e: Error) => setError(e.message));
+  }, [run.runId, path, present]);
+
+  if (!present) return null;
+  return (
+    <Panel title={title} right={<span className="font-mono text-[10px] text-ink-3">{path}</span>}>
+      {error ? <Banner tone="blocking" title={`Cannot read ${path}`}>{error}</Banner> : null}
+      {text !== null ? <Verbatim text={text} /> : error ? null : <Empty>Reading…</Empty>}
+    </Panel>
   );
 }
 

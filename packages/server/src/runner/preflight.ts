@@ -94,7 +94,7 @@ export async function runPreflight(targetRepo: string): Promise<PreflightResult>
       ok: missingAgents.length === 0 && missingCommands.length === 0 && libraryMatches !== false,
       foundAgents: foundAgents.filter((a) => a.startsWith("design-")),
       missingAgents,
-      foundCommands: foundCommands.filter((c) => c === "design" || c.startsWith("design")),
+      foundCommands: foundCommands.filter((c) => c.startsWith("design")),
       missingCommands,
       agentLibrary: lib,
       configLibrary,

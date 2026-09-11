@@ -22,9 +22,10 @@ import type {
   SubmitFeedbackResponse,
 } from "@valiify/studio-shared";
 import type { StudioConfig } from "../config.ts";
-import { readTargetRepo, readValConfig, toolsDirOf } from "../target-repo.ts";
+import { TargetRepoError, readTargetRepo, readValConfig, toolsDirOf } from "../target-repo.ts";
 import { listRuns, readRunDetail } from "../run/reader.ts";
 import { PATTERNS, RUN_FILES, numbered } from "../run/paths.ts";
+import { resolveRunDir, runRoots, type RunRoot } from "../run/roots.ts";
 import { RunsRootWatcher } from "../run/watcher.ts";
 import { parseConcept, prepareConceptForFrame } from "../parse/concept.ts";
 import { prepareRound, writeRound } from "../feedback/writer.ts";
@@ -60,30 +61,33 @@ export function createStudioServer(deps: StudioServerDeps) {
   const { config, runner } = deps;
   const channels = new RunChannels(config.targetRepo);
 
-  /** Resolve a runId to its directory, refusing anything that escapes the runs root. */
-  async function runDirOf(runId: string): Promise<string | null> {
+  /** The configured roots, re-read so a config edited underneath Studio is picked up. */
+  async function roots(): Promise<RunRoot[]> {
     const { config: val } = await readValConfig(config.targetRepo);
-    const root = resolve(config.targetRepo, val.paths?.runOutputDir ?? "val/runs");
-    const dir = resolve(root, normalize(runId));
-    const rel = relative(root, dir);
-    if (rel.startsWith("..") || rel.includes("..")) return null;
-    return existsSync(dir) ? dir : null;
+    return runRoots(config.targetRepo, val, config.fixturesDir);
   }
 
-  const rootWatcher = new RunsRootWatcher(config.targetRepo, "val/runs", () => {
+  /** Resolve a runId to its directory and root, refusing anything that escapes it. */
+  async function runDirOf(runId: string): Promise<{ root: RunRoot; dir: string } | null> {
+    return resolveRunDir(await roots(), runId);
+  }
+
+  const rootWatcher = new RunsRootWatcher(() => {
     void (async () => {
-      const { config: val } = await readValConfig(config.targetRepo);
-      channels.broadcastGlobal({
-        type: "runs",
-        at: new Date().toISOString(),
-        runs: await listRuns(config.targetRepo, val.paths?.runOutputDir ?? "val/runs"),
-      });
-    })();
+      const { runs, errors } = await listRuns(config.targetRepo, await roots());
+      for (const e of errors) console.error(`[studio] ${e}`);
+      channels.broadcastGlobal({ type: "runs", at: new Date().toISOString(), runs, errors });
+    })().catch((err) => console.error(`[studio] run list failed: ${(err as Error).message}`));
   });
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((err) => {
-      if (!res.headersSent) fail(res, 500, "Studio backend error", (err as Error).message);
+      // The target repo going missing or its config going unreadable is a
+      // configuration failure with its own answer, not an opaque 500.
+      const status = err instanceof TargetRepoError ? 502 : 500;
+      const title = err instanceof TargetRepoError ? "Cannot read the target repo" : "Studio backend error";
+      console.error(`[studio] ${title}: ${(err as Error).message}`);
+      if (!res.headersSent) fail(res, status, title, (err as Error).message);
       else res.end();
     });
   });
@@ -146,8 +150,9 @@ export function createStudioServer(deps: StudioServerDeps) {
 
     // ---- runs ------------------------------------------------------------------
     if (path === "/api/runs" && req.method === "GET") {
-      const { config: val } = await readValConfig(config.targetRepo);
-      return void json(res, 200, { runs: await listRuns(config.targetRepo, val.paths?.runOutputDir ?? "val/runs") });
+      // `errors` travels with the list: an unreadable runs root must not look like
+      // "no runs yet".
+      return void json(res, 200, await listRuns(config.targetRepo, await roots()));
     }
 
     if (path === "/api/events") return void channels.attachGlobal(res);
@@ -158,17 +163,28 @@ export function createStudioServer(deps: StudioServerDeps) {
       const runId = decodeURIComponent(seg[2]);
       const rest = seg.slice(3);
 
+      const found = await runDirOf(runId);
+      if (!found) return void fail(res, 404, `No run "${runId}"`);
+      const { root, dir } = found;
+
+      /** A fixture is a committed record in someone else's repo: never written to. */
+      const refuseWrite = (): boolean => {
+        if (!root.readOnly) return false;
+        fail(
+          res,
+          403,
+          `"${runId}" is a read-only reference run`,
+          `It lives under ${root.relDir}/, which Studio opens for reading only. A fixture is a committed record — writing a feedback round, an answers file or an approval into one would leave an unexplained diff in the target repo. Start a run under the live runs directory instead.`,
+        );
+        return true;
+      };
+
       if (rest[0] === "events") {
-        const dir = await runDirOf(runId);
-        if (!dir) return void fail(res, 404, `No run "${runId}"`);
-        return void (await channels.attach(runId, dir, res));
+        return void (await channels.attach(runId, dir, res, root));
       }
 
-      const dir = await runDirOf(runId);
-      if (!dir) return void fail(res, 404, `No run "${runId}"`);
-
       if (!rest.length && req.method === "GET") {
-        return void json(res, 200, await readRunDetail(config.targetRepo, dir));
+        return void json(res, 200, await readRunDetail(config.targetRepo, dir, root));
       }
 
       // The concept, prepared for the iframe: stylesheet repointed, overlay bridge added.
@@ -204,24 +220,28 @@ export function createStudioServer(deps: StudioServerDeps) {
       }
 
       if (rest[0] === "answers" && req.method === "POST") {
+        if (refuseWrite()) return;
         const payload = await body<SubmitAnswersRequest>(req);
         if (!payload.answers?.length) return void fail(res, 400, "No answers supplied");
         // Verbatim — this is what the pipeline re-reads.
         const written = await writeAnswers(dir, payload.answers, payload.note);
-        return void json(res, 200, { ...written, run: await readRunDetail(config.targetRepo, dir) });
+        return void json(res, 200, { ...written, run: await readRunDetail(config.targetRepo, dir, root) });
       }
 
       if (rest[0] === "feedback" && req.method === "POST") {
-        return void (await submitFeedback(req, res, runId, dir));
+        if (refuseWrite()) return;
+        return void (await submitFeedback(req, res, runId, dir, root));
       }
 
       if (rest[0] === "approve" && req.method === "POST") {
+        if (refuseWrite()) return;
         return void (await approve(req, res, runId, dir));
       }
 
       if (rest[0] === "commit" && req.method === "POST") {
+        if (refuseWrite()) return;
         const payload = await body<CommitRunRequest>(req);
-        const detail = await readRunDetail(config.targetRepo, dir);
+        const detail = await readRunDetail(config.targetRepo, dir, root);
         // commitRun refuses anything that is not signed-off; the stage comes from
         // the run directory, so this cannot be talked into committing early.
         const result = await commitRun(config.targetRepo, dir, detail.stage, payload.message);
@@ -277,7 +297,13 @@ export function createStudioServer(deps: StudioServerDeps) {
     json(res, 202, response);
   }
 
-  async function submitFeedback(req: IncomingMessage, res: ServerResponse, runId: string, dir: string): Promise<void> {
+  async function submitFeedback(
+    req: IncomingMessage,
+    res: ServerResponse,
+    runId: string,
+    dir: string,
+    root: RunRoot,
+  ): Promise<void> {
     const payload = await body<SubmitFeedbackRequest>(req);
     const { config: val } = await readValConfig(config.targetRepo);
     let prepared;
@@ -303,7 +329,7 @@ export function createStudioServer(deps: StudioServerDeps) {
       round: prepared.round.round,
       validation,
       accepted: accepted && !payload.dryRun,
-      run: await readRunDetail(config.targetRepo, dir),
+      run: await readRunDetail(config.targetRepo, dir, root),
     };
     json(res, accepted ? 200 : 422, response);
   }
@@ -312,6 +338,7 @@ export function createStudioServer(deps: StudioServerDeps) {
     const payload = await body<ApproveRequest>(req);
     const detail = await readRunDetail(config.targetRepo, dir);
     const target = await readTargetRepo(config.targetRepo);
+
     const runRelPath = relative(config.targetRepo, dir);
 
     // Invoking /design build IS the approval. Studio does not write 04-approval.md
@@ -331,11 +358,17 @@ export function createStudioServer(deps: StudioServerDeps) {
   }
 
   return {
-    listen: (port: number, host: string) =>
-      new Promise<void>((r) => {
-        rootWatcher.start();
-        server.listen(port, host, r);
-      }),
+    listen: async (port: number, host: string) => {
+      await rootWatcher.start(await roots());
+      // A listen failure must reject, not surface as an unhandled 'error' event.
+      await new Promise<void>((resolvePromise, reject) => {
+        server.once("error", reject);
+        server.listen(port, host, () => {
+          server.off("error", reject);
+          resolvePromise();
+        });
+      });
+    },
     close: () => {
       rootWatcher.stop();
       channels.close();

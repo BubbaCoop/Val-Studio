@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import type { StudioHealth, SurfaceSummary } from "@valiify/studio-shared";
 import { api } from "./api.ts";
 import { useRunList, useRunStream } from "./useRunStream.ts";
-import { Button, Empty, Panel, Tag, Verbatim } from "./components/ui.tsx";
+import { Banner, Button, Empty, Panel, Tag, Verbatim } from "./components/ui.tsx";
 import { GateRail } from "./components/GateRail.tsx";
 import { SurfacePicker } from "./screens/SurfacePicker.tsx";
 import { BlockedBrief, BriefIntake } from "./screens/BriefIntake.tsx";
@@ -24,7 +24,7 @@ export default function App() {
   const [health, setHealth] = useState<StudioHealth | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [view, setView] = useState<View>({ name: "surfaces" });
-  const { runs } = useRunList();
+  const { runs, errors } = useRunList();
 
   useEffect(() => {
     api.health().then(setHealth).catch((e) => setBootError(e.message));
@@ -76,6 +76,8 @@ export default function App() {
       <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="flex flex-col gap-3">
           <Button onClick={() => setView({ name: "surfaces" })}>+ New run</Button>
+          {/* An unreadable runs root is shown here, never as an empty list. */}
+          {errors.map((e, i) => <Banner key={i} tone="blocking" title="Cannot read a runs directory">{e}</Banner>)}
           <RunList runs={runs} onOpen={(runId) => setView({ name: "run", runId })} />
         </aside>
         <main className="min-w-0">
@@ -94,20 +96,55 @@ export default function App() {
 
 function SurfacePickerScreen({ onPick }: { onPick: (s: SurfaceSummary) => void }) {
   const [target, setTarget] = useState<Awaited<ReturnType<typeof api.target>> | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     // Re-read on every visit: a surface added to val/config.json shows up without a restart.
-    api.target().then(setTarget).catch(() => {});
+    setError(null);
+    api.target().then(setTarget).catch((e: Error) => setError(e.message));
   }, []);
+  // A config that cannot be read used to leave this screen on "Reading…" forever.
+  if (error) {
+    return (
+      <Banner tone="blocking" title="Cannot read the target repo's val/config.json">
+        {error}
+        <p className="mt-2 text-[10px]">
+          Studio drives an existing val-inited library repo. Check the <code className="font-mono">--target</code>{" "}
+          path, and that <code className="font-mono">val/config.json</code> is present and valid JSON.
+        </p>
+      </Banner>
+    );
+  }
   if (!target) return <Empty>Reading val/config.json…</Empty>;
   return <SurfacePicker target={target} onPick={onPick} />;
 }
 
 function RunScreen({ runId }: { runId: string }) {
-  const { run, connected, progress, transitions } = useRunStream(runId);
+  const { run, connected, progress, transitions, error, lastEventAt } = useRunStream(runId);
   const [refresh, setRefresh] = useState(0);
-  const bump = () => setRefresh((r) => r + 1);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const bump = () => {
+    setActionError(null);
+    setRefresh((r) => r + 1);
+  };
 
-  if (!run) return <Empty>Attaching to {runId}…</Empty>;
+  if (!run) {
+    return (
+      <div className="flex flex-col gap-4">
+        {/*
+          A run Studio dispatched does not exist until Gate 0 creates its directory,
+          so "attaching" is normal for a moment. A stream that will not connect is
+          not, and used to sit on this line forever.
+        */}
+        {connected || !error ? <Empty>Attaching to {runId}…</Empty> : null}
+        {!connected && (
+          <Banner tone="blocking" title={`Cannot attach to "${runId}"`}>
+            The run directory is not there yet, or the Studio backend is down. Gate 0 creates the directory —
+            until it does, there is nothing to read. {error ?? ""}
+          </Banner>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4" key={refresh}>
@@ -115,28 +152,73 @@ function RunScreen({ runId }: { runId: string }) {
         <h1 className="font-mono text-sm">{run.runId}</h1>
         <div className="flex items-center gap-1.5">
           {run.surface && <Tag>{run.surface}</Tag>}
+          {run.readOnly && <Tag tone="draft">read-only reference run</Tag>}
           <Tag tone={connected ? "ok" : "blocking"}>{connected ? "live" : "disconnected"}</Tag>
         </div>
       </div>
 
+      {/*
+        Three failures that used to be invisible: a dropped stream (the run stops
+        moving and looks slow), a runner that failed (nothing ever appears), and a
+        manifest that is on disk but corrupt (which read as "no manifest yet").
+      */}
+      {!connected && (
+        <Banner tone="blocking" title="Live updates are disconnected">
+          This screen is showing the last snapshot it received
+          {lastEventAt ? ` (${new Date(lastEventAt).toLocaleTimeString()})` : ""}. The run may have advanced since.
+          The browser retries on its own; if it does not come back, the Studio backend has stopped.
+        </Banner>
+      )}
+      {error && <Banner tone="blocking" title="The pipeline run failed">{error}</Banner>}
+      {actionError && <Banner tone="blocking" title="That action failed">{actionError}</Banner>}
+      {run.manifestError && (
+        <Banner tone="blocking" title="manifest.json is unreadable">
+          {run.manifestError} — the stage below is derived from the files on disk alone, so anything only the
+          manifest can express (awaiting-approval, the loop counters, the gate records) is missing.
+        </Banner>
+      )}
+      {run.readError && <Banner tone="blocking" title="Cannot read the run directory">{run.readError}</Banner>}
+      {run.readOnly && (
+        <Banner tone="draft" title="Reference run — open for reading only">
+          This run lives under the target repo's tracked fixtures. Studio refuses every write against it: no
+          feedback round, no answers file, no approval, no commit. A fixture is a committed record.
+        </Banner>
+      )}
+
       <GateRail stage={run.stage} loops={run.loops} transitions={transitions} />
 
       {/* Stage picks the screen. The stage came from the run directory. */}
-      {run.stage === "blocked-brief" && <BlockedBrief run={run} onSubmitted={bump} />}
-      {(run.stage === "concept" || run.stage === "critique") && <ConceptReview run={run} onChanged={bump} />}
+      {run.stage === "blocked-brief" && <BlockedBrief run={run} onSubmitted={bump} onError={setActionError} />}
+      {(run.stage === "concept" || run.stage === "critique") && (
+        <ConceptReview run={run} onChanged={bump} onError={setActionError} canSendFeedback={!run.readOnly} />
+      )}
       {run.stage === "awaiting-approval" && (
         <>
-          <ConceptReview run={run} onChanged={bump} />
-          <Approve run={run} onApproved={bump} />
+          <ConceptReview run={run} onChanged={bump} onError={setActionError} canSendFeedback={!run.readOnly} />
+          <Approve run={run} onApproved={bump} onError={setActionError} />
         </>
       )}
-      {(run.stage === "approved" || run.stage === "build") && <Approve run={run} onApproved={bump} />}
+      {(run.stage === "approved" || run.stage === "build") && (
+        <Approve run={run} onApproved={bump} onError={setActionError} />
+      )}
       {(run.stage === "verified" || run.stage === "signed-off") && (
         <>
+          {/* Past the seal the concept is still the thing the package was built from,
+              so it stays readable — with no round on offer, because there is no gate
+              left to accept one. */}
+          <ConceptReview run={run} onChanged={bump} onError={setActionError} canSendFeedback={false} />
+          <Approve run={run} onApproved={bump} onError={setActionError} />
           <Handoff run={run} />
           <CommitPanel
             git={run.git}
-            onCommit={(message) => void api.commit(run.runId, message).then(bump)}
+            readOnly={run.readOnly}
+            onCommit={(message) =>
+              void api.commit(run.runId, message).then((r) => {
+                // A refusal is an answer the reviewer has to see, not a no-op.
+                if (r.committed) bump();
+                else setActionError(r.refusedReason ?? "The commit was refused with no reason given.");
+              })
+            }
           />
         </>
       )}

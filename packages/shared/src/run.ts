@@ -93,6 +93,16 @@ export interface GitState {
   commitWithheldReason?: string;
 }
 
+/**
+ * Which root a run directory was found under.
+ *
+ * `runs` is the live `paths.runOutputDir`. `fixtures` is the target repo's tracked
+ * reference runs — openable so a designer can look at a real signed-off run, and
+ * READ-ONLY, because a fixture is a committed record and a feedback round or an
+ * approval written into one would show up as an unexplained diff in that repo.
+ */
+export type RunRootId = "runs" | "fixtures";
+
 /** A row in the run list. Cheap: manifest + a directory listing, no file parsing. */
 export interface RunSummary {
   /**
@@ -119,6 +129,22 @@ export interface RunSummary {
   updatedAt: string;
   /** True when this run's manifest is absent — a run dir the CLI has only just created. */
   manifestMissing: boolean;
+  /**
+   * Set when manifest.json EXISTS but could not be read or parsed. Distinct from
+   * `manifestMissing`: a half-written manifest during an agent write is normal and
+   * transient, a corrupt one is a defect, and collapsing the two hid the second.
+   */
+  manifestError?: string;
+  /** Set when the run directory itself could not be listed. Never silently empty. */
+  readError?: string;
+  /** Which root this run was found under. */
+  root: RunRootId;
+  /**
+   * True for a fixture. Studio refuses every write against a read-only run —
+   * answers, feedback rounds, approval, commit — rather than writing into a tracked
+   * reference run in someone else's repo.
+   */
+  readOnly: boolean;
 }
 
 /** Everything a screen needs about one run. */

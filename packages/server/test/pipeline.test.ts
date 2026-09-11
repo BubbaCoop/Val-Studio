@@ -8,19 +8,22 @@
  * claim that cannot be made by inspection.
  */
 import { deepStrictEqual, ok, strictEqual } from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { readRunDetail } from "../src/run/reader.ts";
+import { readRunDetail, verdictOf } from "../src/run/reader.ts";
 import { deriveStage } from "../src/run/stage.ts";
 import { parseConcept, prepareConceptForFrame } from "../src/parse/concept.ts";
 import { parseOpenQuestions, parseClarificationBlock } from "../src/parse/clarification.ts";
 import { prepareRound, renderFeedback, writeRound } from "../src/feedback/writer.ts";
 import { runFeedbackCheck } from "../src/feedback/check.ts";
 import { readTargetRepo, readValConfig } from "../src/target-repo.ts";
+import { listRuns } from "../src/run/reader.ts";
+import { parseRunKey, resolveRunDir, runKey, runRoots } from "../src/run/roots.ts";
 import { renderBrief } from "../src/inputs.ts";
-import { commitAllowed } from "../src/git.ts";
+import { commitAllowed, commitRun } from "../src/git.ts";
 
 const REPO = process.env.VAL_STUDIO_TARGET_REPO ?? "/Users/nicholascooper/Desktop/valiify shortapp library";
 const SIGNED_OFF = join(REPO, "val/fixtures/signed-off-run");
@@ -68,9 +71,12 @@ maybe("reading a signed-off run", () => {
   });
 
   it("parses both verdict spellings the pipeline writes in practice", async () => {
-    // The fixtures use `**VERDICT: FAIL**`; the methodology documents `CRITIQUE: FAIL | …`.
+    // The template specifies `CRITIQUE: FAIL | FINDINGS: n | BLOCKING: n`. The runs in
+    // this repo carry that AND a prose `**VERDICT: FAIL**` opener — an upstream
+    // divergence Studio reads through rather than normalises away.
     const d = await readRunDetail(REPO, SIGNED_OFF);
     deepStrictEqual(d.critiques.map((c) => c.verdict), ["FAIL", "PASS"]);
+    strictEqual(d.critiques[0].findings, 10);
     strictEqual(d.critiques[0].blocking, 1);
     strictEqual(d.verifications[0]?.verdict, "PASS");
   });
@@ -87,6 +93,60 @@ maybe("reading a signed-off run", () => {
     for (const s of ["concept", "critique", "awaiting-approval", "approved", "build", "verified"] as const) {
       ok(!commitAllowed(s), `${s} is an intermediate gate — never committed`);
     }
+  });
+
+  it("refuses an intermediate-gate commit with a reason, and runs no git at all", async () => {
+    const r = await commitRun(REPO, SIGNED_OFF, "awaiting-approval");
+    strictEqual(r.committed, false);
+    ok(r.refusedReason?.includes("signed-off"), "the refusal says where the commit action lives");
+  });
+});
+
+maybe("fixtures are listed as read-only reference runs", () => {
+  it("namespaces a fixture's id so it can never be confused with a live run", async () => {
+    const { config } = await readValConfig(REPO);
+    const roots = runRoots(REPO, config, "val/fixtures");
+    deepStrictEqual(roots.map((r) => r.id), ["runs", "fixtures"]);
+    strictEqual(roots[0].readOnly, false);
+    strictEqual(roots[1].readOnly, true);
+    strictEqual(runKey(roots[1], "signed-off-run"), "fixtures:signed-off-run");
+    deepStrictEqual(parseRunKey("fixtures:signed-off-run"), { rootId: "fixtures", name: "signed-off-run" });
+    // A live run keeps the bare directory name — the id `/design build` is invoked with.
+    deepStrictEqual(parseRunKey("2026-09-11-design-primary-contact"), {
+      rootId: "runs",
+      name: "2026-09-11-design-primary-contact",
+    });
+  });
+
+  it("refuses a traversal out of either root", async () => {
+    const { config } = await readValConfig(REPO);
+    const roots = runRoots(REPO, config, "val/fixtures");
+    strictEqual(resolveRunDir(roots, "../fixtures/signed-off-run"), null);
+    strictEqual(resolveRunDir(roots, "fixtures:../runs"), null);
+    ok(resolveRunDir(roots, "fixtures:signed-off-run"), "the fixture itself resolves");
+  });
+
+  it("lists both roots, and marks only the fixtures read-only", async () => {
+    const { config } = await readValConfig(REPO);
+    const { runs, errors } = await listRuns(REPO, runRoots(REPO, config, "val/fixtures"));
+    deepStrictEqual(errors, [], "both configured roots are readable");
+    const fixture = runs.find((r) => r.runId === "fixtures:signed-off-run")!;
+    ok(fixture, "the signed-off fixture is openable");
+    strictEqual(fixture.readOnly, true);
+    strictEqual(fixture.root, "fixtures");
+    strictEqual(fixture.stage, "signed-off");
+    for (const r of runs.filter((x) => x.root === "runs")) {
+      strictEqual(r.readOnly, false, `${r.runId} is a live run`);
+    }
+  });
+
+  it("reports an unreadable runs root instead of returning an empty list", async () => {
+    const { config } = await readValConfig(REPO);
+    const roots = runRoots(REPO, { ...config, paths: { ...config.paths, runOutputDir: "val/does-not-exist" } }, "");
+    const { runs, errors } = await listRuns(REPO, roots);
+    deepStrictEqual(runs, []);
+    strictEqual(errors.length, 1, "\"no runs yet\" and \"cannot read the runs root\" are different answers");
+    ok(errors[0].includes("val/does-not-exist"));
   });
 });
 
@@ -236,6 +296,72 @@ maybe("a feedback round must satisfy val-core's own validator", () => {
     });
     const row = md.split("\n").find((l) => l.startsWith("| H1"))!;
     strictEqual(row.split("|").length - 2, 6, "still exactly six cells");
+  });
+});
+
+describe("the verdict line is read from the status line, not the whole document", () => {
+  it("accepts both spellings the pipeline writes", () => {
+    strictEqual(verdictOf("CRITIQUE: FAIL | FINDINGS: 3 | BLOCKING: 2", "CRITIQUE").verdict, "FAIL");
+    strictEqual(verdictOf("**VERDICT: PASS** — zero blocking findings.", "CRITIQUE").verdict, "PASS");
+    strictEqual(verdictOf("VERIFY: PASS | BLOCKING: 0", "VERIFY").verdict, "PASS");
+  });
+
+  it("takes the counts off the line that carries them", () => {
+    const v = verdictOf(
+      [
+        "# Critique 2 — v2",
+        "**VERDICT: PASS** — zero blocking findings.",
+        "",
+        "The previous pass reported FINDINGS: 10 | BLOCKING: 1 and is not this critique.",
+        "",
+        "CRITIQUE: PASS | VERSION: v2 | FINDINGS: 1 | BLOCKING: 0 | ADVISORY: 1",
+      ].join("\n"),
+      "CRITIQUE",
+    );
+    strictEqual(v.verdict, "PASS");
+    // A whole-document scrape would have read the quoted line and reported 10 and 1.
+    strictEqual(v.findings, 1);
+    strictEqual(v.blocking, 0);
+  });
+
+  it("reports UNKNOWN rather than guessing when there is no verdict at all", () => {
+    strictEqual(verdictOf("# Critique\n\nSome prose.", "CRITIQUE").verdict, "UNKNOWN");
+  });
+});
+
+describe("every clarification the run directory carries is surfaced", () => {
+  it("reads Gate 1, Gate 2 and a Gate 4a refusal — one shape, one component", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "studio-clar-"));
+    try {
+      await mkdir(join(dir, "02-concept"), { recursive: true });
+      await mkdir(join(dir, "00-input"), { recursive: true });
+      await writeFile(
+        join(dir, "01-brief.md"),
+        ["# Brief — x", "## Open questions", "### BLOCKING", "```", "Q: Which flow?", "TRIGGER: brief-missing-field", "```", ""].join("\n"),
+      );
+      await writeFile(
+        join(dir, "02-concept/concept.md"),
+        ["# Concept", "## Open questions", "```", "Q: Which class carries the seam?", "TRIGGER: no-component", "```", ""].join("\n"),
+      );
+      await writeFile(
+        join(dir, "00-input/questions-1.md"),
+        [
+          "Q: Can the name row use a 1.5px stroke?",
+          "TRIGGER: §13-open-item",
+          "ROUTE: add a §12 planned addition with an interim class — the edit belongs in the methodology file and git.",
+          "",
+        ].join("\n"),
+      );
+
+      const d = await readRunDetail(dir, dir);
+      deepStrictEqual(d.clarifications.map((c) => c.origin), ["brief", "concept", "feedback"]);
+      strictEqual(d.clarifications[1].gate, 2, "a blocked concept is a Gate 2 stop, not a Gate 1 one");
+      const refusal = d.clarifications[2].questions[0];
+      ok(refusal.route?.includes("§12 planned addition"), "the ROUTE survives — a refusal without it is a bare no");
+      ok(refusal.blocking);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

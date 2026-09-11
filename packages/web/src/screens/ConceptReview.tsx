@@ -23,7 +23,20 @@ import { ConceptFrame } from "../components/ConceptFrame.tsx";
 import { FindingComposer, FindingRows } from "../components/FindingComposer.tsx";
 import { ClarificationList } from "../components/Clarification.tsx";
 
-export function ConceptReview({ run, onChanged }: { run: RunDetail; onChanged: () => void }) {
+export function ConceptReview({
+  run, onChanged, onError, canSendFeedback = true,
+}: {
+  run: RunDetail;
+  onChanged: () => void;
+  onError?: (message: string) => void;
+  /**
+   * A Gate 4a round re-enters Gate 2, so it is only legal while the run is still at
+   * the concept, critique or human gate. Past the seal — and on a read-only reference
+   * run — the concept is still worth reading, and Studio must not offer a round the
+   * pipeline would have no gate to accept.
+   */
+  canSendFeedback?: boolean;
+}) {
   const latest = run.concepts.at(-1);
   const [viewingVersion, setViewingVersion] = useState<number | null>(null);
   const [concept, setConcept] = useState<ConceptDoc | null>(run.latestConcept);
@@ -52,17 +65,24 @@ export function ConceptReview({ run, onChanged }: { run: RunDetail; onChanged: (
   async function send(dryRun: boolean) {
     if (!viewingFile) return;
     setBusy(true);
-    const res = await api.feedback(run.runId, {
-      // Pinned to what is on screen, always.
-      concept: viewingFile,
-      findings,
-      dryRun,
-    });
-    setResult(res);
-    setBusy(false);
-    if (res.accepted) {
-      setFindings([]);
-      onChanged();
+    try {
+      const res = await api.feedback(run.runId, {
+        // Pinned to what is on screen, always.
+        concept: viewingFile,
+        findings,
+        dryRun,
+      });
+      setResult(res);
+      if (res.accepted) {
+        setFindings([]);
+        onChanged();
+      }
+    } catch (e) {
+      // A transport or refusal error is not a validator verdict, and must not be
+      // rendered as one — the round was never validated at all.
+      onError?.((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -86,12 +106,13 @@ export function ConceptReview({ run, onChanged }: { run: RunDetail; onChanged: (
                       setViewingVersion(c.version);
                       setSelected(null);
                       setResult(null);
+                      // The composer offers ids from THIS version. A failure here
+                      // would leave it offering the previous version's ids, so it is
+                      // reported rather than swallowed.
                       void api
-                        .run(run.runId)
-                        .then(() => fetch(`/api/runs/${run.runId}/concept-blocks/${c.version}`))
-                        .then((r) => r.json())
+                        .conceptBlocks(run.runId, c.version)
                         .then(setConcept)
-                        .catch(() => {});
+                        .catch((e: Error) => onError?.(`Cannot read concept v${c.version}: ${e.message}`));
                     }}
                     className={`border px-2 py-0.5 font-mono text-[10px] ${
                       c.version === viewing ? "border-ink bg-ink text-white" : "border-line bg-ground text-ink-2"
@@ -115,13 +136,13 @@ export function ConceptReview({ run, onChanged }: { run: RunDetail; onChanged: (
               selectedId={selected}
               onSelect={(id) => {
                 setSelected(id);
-                setComposing(true);
+                if (canSendFeedback) setComposing(true);
               }}
               version={viewing!}
             />
           </Panel>
 
-          {composing && doc && (
+          {canSendFeedback && composing && doc && (
             <FindingComposer
               concept={doc}
               seedBlock={selected}
@@ -185,7 +206,13 @@ export function ConceptReview({ run, onChanged }: { run: RunDetail; onChanged: (
             title="Feedback round"
             right={<span className="font-mono text-[10px] text-ink-3">round {run.loops.feedback + 1} · uncapped</span>}
           >
-            {findings.length === 0 ? (
+            {!canSendFeedback ? (
+              <p className="text-xs text-ink-3">
+                {run.readOnly
+                  ? "This is a read-only reference run — it takes no feedback rounds."
+                  : `A feedback round re-enters Gate 2, so it is offered at the concept, critique and human gates. This run is at "${run.stage}".`}
+              </p>
+            ) : findings.length === 0 ? (
               <Empty>Select a block in the concept to compose a finding.</Empty>
             ) : (
               <>
@@ -197,8 +224,13 @@ export function ConceptReview({ run, onChanged }: { run: RunDetail; onChanged: (
                   }
                 />
                 <div className="mt-3 flex justify-end gap-2">
-                  <Button onClick={() => void send(true)} disabled={busy}>Validate only</Button>
-                  <Button kind="primary" onClick={() => void send(false)} disabled={busy || !isLatest}>
+                  <Button onClick={() => void send(true)} disabled={busy || run.readOnly}>Validate only</Button>
+                  <Button
+                    kind="primary"
+                    onClick={() => void send(false)}
+                    disabled={busy || !isLatest || run.readOnly}
+                    title={run.readOnly ? "A reference run takes no feedback rounds" : undefined}
+                  >
                     {busy ? "Validating…" : "Send round"}
                   </Button>
                 </div>

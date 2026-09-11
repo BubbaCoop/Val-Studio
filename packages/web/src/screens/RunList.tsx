@@ -38,7 +38,9 @@ export function RunList({ runs, onOpen }: { runs: RunSummary[]; onOpen: (runId: 
                   <Tag tone={TONE[r.stage] ?? "neutral"}>{r.stage}</Tag>
                   <Tag>v{r.conceptVersions}</Tag>
                   {r.loops.feedback > 0 && <Tag>{r.loops.feedback} feedback</Tag>}
+                  {r.root === "fixtures" && <Tag tone="draft">reference</Tag>}
                   {r.manifestMissing && <Tag tone="draft">no manifest</Tag>}
+                  {r.manifestError && <Tag tone="blocking">manifest unreadable</Tag>}
                 </span>
               </button>
             </li>
@@ -57,10 +59,12 @@ export function RunList({ runs, onOpen }: { runs: RunSummary[]; onOpen: (runId: 
  * this panel says why it is withholding rather than hiding the state.
  */
 export function CommitPanel({
-  git, onCommit,
+  git, onCommit, readOnly = false,
 }: {
   git: RunSummaryGit;
   onCommit: (message?: string) => void;
+  /** A reference run is never committed from here — it is already committed. */
+  readOnly?: boolean;
 }) {
   if (!git.isRepo) return null;
   return (
@@ -80,7 +84,12 @@ export function CommitPanel({
           last: {git.lastCommit.sha} {git.lastCommit.subject}
         </p>
       )}
-      {git.commitOffered ? (
+      {readOnly ? (
+        <p className="mt-3 border-l-2 border-line pl-2 text-xs text-ink-3">
+          This is a read-only reference run. It is already part of the target repo's history; Studio does not
+          commit into it.
+        </p>
+      ) : git.commitOffered ? (
         <div className="mt-3">
           <p className="text-xs text-ink-2">
             This run is signed off: the directory holds the sealed approval and the verified package, and is worth

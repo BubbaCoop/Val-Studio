@@ -8,9 +8,9 @@
 import type {
   BriefSchemaResponse,
   CommitRunResponse,
+  ConceptDoc,
   CreateRunRequest,
   CreateRunResponse,
-  DesignContract,
   RunDetail,
   RunListResponse,
   StudioHealth,
@@ -69,20 +69,28 @@ export const api = {
   },
   approve: (runId: string, message: string) =>
     post<{ runId: string; prompt: string }>(`/api/runs/${encodeURIComponent(runId)}/approve`, { message }),
+  /**
+   * A refusal comes back as a 409 with `refusedReason`, and a read-only run as a 403.
+   * Both are answers, not transport failures, so both are returned for the UI to show.
+   */
   commit: async (runId: string, message?: string): Promise<CommitRunResponse> => {
     const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}/commit`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ message }),
     });
-    return (await res.json()) as CommitRunResponse;
+    const parsed = await res.json();
+    if (res.status === 200 || res.status === 409) return parsed as CommitRunResponse;
+    return { committed: false, refusedReason: parsed?.detail ?? parsed?.error ?? res.statusText };
   },
   file: async (runId: string, path: string): Promise<string> => {
     const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}/file?path=${encodeURIComponent(path)}`);
     if (!res.ok) throw new ApiError(res.status, `Cannot read ${path}`);
     return res.text();
   },
-  contract: (runId: string) => req<DesignContract>(`/api/runs/${encodeURIComponent(runId)}/file?path=05-package/contract.json`),
+  /** The parsed blocks of one concept version — what the overlay is keyed by. */
+  conceptBlocks: (runId: string, version: number) =>
+    req<ConceptDoc>(`/api/runs/${encodeURIComponent(runId)}/concept-blocks/${version}`),
   conceptUrl: (runId: string, version: number) =>
     `${BASE}/api/runs/${encodeURIComponent(runId)}/concept/${version}`,
   runEventsUrl: (runId: string) => `${BASE}/api/runs/${encodeURIComponent(runId)}/events`,

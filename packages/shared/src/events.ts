@@ -104,6 +104,11 @@ export interface RunListEvent {
   type: "runs";
   at: string;
   runs: RunSummary[];
+  /**
+   * Roots that could not be read. Carried with the list so an unreadable
+   * `paths.runOutputDir` cannot be mistaken for "no runs yet".
+   */
+  errors: string[];
 }
 
 export type StudioEvent = RunEvent | RunListEvent;

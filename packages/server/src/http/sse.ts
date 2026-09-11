@@ -12,6 +12,7 @@
 import type { ServerResponse } from "node:http";
 import type { RunEvent, StudioEvent } from "@valiify/studio-shared";
 import { RunWatcher } from "../run/watcher.ts";
+import type { RunRoot } from "../run/roots.ts";
 
 const HEARTBEAT_MS = 25_000;
 
@@ -20,8 +21,21 @@ interface Client {
   alive: boolean;
 }
 
-function write(res: ServerResponse, event: StudioEvent): void {
-  res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+/**
+ * Write one event. A client that has gone away without its `close` firing — a laptop
+ * that slept, a proxy that dropped the connection — would otherwise throw here and
+ * take the rest of the broadcast with it, so the surviving clients silently stop
+ * receiving updates. Returns false so the caller can drop the dead client.
+ */
+function write(res: ServerResponse, event: StudioEvent): boolean {
+  if (res.writableEnded || res.destroyed) return false;
+  try {
+    res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    return true;
+  } catch (err) {
+    console.warn(`[studio] dropping an SSE client: ${(err as Error).message}`);
+    return false;
+  }
 }
 
 export function openStream(res: ServerResponse): void {
@@ -45,23 +59,25 @@ export class RunChannels {
 
   constructor(repo: string) {
     this.repo = repo;
+    // The heartbeat is also the liveness check: a client the write fails for is gone,
+    // and keeping it in the set would mean broadcasting into a closed socket forever.
     this.heartbeat = setInterval(() => {
       const at = new Date().toISOString();
-      for (const ch of this.channels.values()) {
-        for (const c of ch.clients) write(c.res, { type: "heartbeat", at });
+      for (const [runId, ch] of this.channels) {
+        for (const c of ch.clients) if (!write(c.res, { type: "heartbeat", at })) this.drop(runId, c);
       }
-      for (const c of this.globalClients) write(c.res, { type: "heartbeat", at });
+      for (const c of this.globalClients) if (!write(c.res, { type: "heartbeat", at })) this.globalClients.delete(c);
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
 
-  async attach(runId: string, runDir: string, res: ServerResponse): Promise<void> {
+  async attach(runId: string, runDir: string, res: ServerResponse, root?: RunRoot): Promise<void> {
     openStream(res);
     const client: Client = { res, alive: true };
     let ch = this.channels.get(runId);
     if (!ch) {
       const clients = new Set<Client>();
-      const watcher = new RunWatcher(this.repo, runDir, runId, (e) => this.broadcast(runId, e));
+      const watcher = new RunWatcher(this.repo, runDir, runId, (e) => this.broadcast(runId, e), root);
       ch = { watcher, clients };
       this.channels.set(runId, ch);
       ch.clients.add(client);
@@ -75,7 +91,7 @@ export class RunChannels {
         type: "snapshot",
         runId,
         at: new Date().toISOString(),
-        run: await readRunDetail(this.repo, runDir),
+        run: await readRunDetail(this.repo, runDir, root),
       });
     }
 
@@ -99,11 +115,23 @@ export class RunChannels {
   broadcast(runId: string, event: RunEvent): void {
     const ch = this.channels.get(runId);
     if (!ch) return;
-    for (const c of ch.clients) if (c.alive) write(c.res, event);
+    for (const c of ch.clients) if (c.alive && !write(c.res, event)) this.drop(runId, c);
   }
 
   broadcastGlobal(event: StudioEvent): void {
-    for (const c of this.globalClients) if (c.alive) write(c.res, event);
+    for (const c of this.globalClients) if (c.alive && !write(c.res, event)) this.globalClients.delete(c);
+  }
+
+  /** Forget a client whose socket is gone, and stop its watcher if it was the last. */
+  private drop(runId: string, client: Client): void {
+    const ch = this.channels.get(runId);
+    if (!ch) return;
+    client.alive = false;
+    ch.clients.delete(client);
+    if (!ch.clients.size) {
+      ch.watcher.stop();
+      this.channels.delete(runId);
+    }
   }
 
   /** Relay token-level progress from a runner. Advisory: never a stage record. */
@@ -117,7 +145,12 @@ export class RunChannels {
 
   close(): void {
     clearInterval(this.heartbeat);
-    for (const ch of this.channels.values()) ch.watcher.stop();
+    for (const ch of this.channels.values()) {
+      ch.watcher.stop();
+      for (const c of ch.clients) c.res.end();
+    }
     this.channels.clear();
+    for (const c of this.globalClients) c.res.end();
+    this.globalClients.clear();
   }
 }

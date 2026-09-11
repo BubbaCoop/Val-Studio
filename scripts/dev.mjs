@@ -2,6 +2,10 @@
  * Run the backend and the frontend together. Zero dependencies on purpose.
  *
  * Usage: npm run dev -- --target '<path to the library repo>'
+ *
+ * Frontend on :4316, backend on :4317 with /api proxied. Every other flag is passed
+ * through to the backend: --port, --host, --runner stub|agent-sdk, --fixtures <dir>.
+ * Quote the target — the working one contains spaces.
  */
 import { spawn } from "node:child_process";
 

@@ -128,7 +128,13 @@ export function BriefIntake({
 }
 
 /** The BRIEF: BLOCKED view. Same component as a refusal, by design. */
-export function BlockedBrief({ run, onSubmitted }: { run: RunDetail; onSubmitted: () => void }) {
+export function BlockedBrief({
+  run, onSubmitted, onError,
+}: {
+  run: RunDetail;
+  onSubmitted: () => void;
+  onError?: (message: string) => void;
+}) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const round = run.clarifications[0];
@@ -152,14 +158,20 @@ export function BlockedBrief({ run, onSubmitted }: { run: RunDetail; onSubmitted
         </p>
         <Button
           kind="primary"
-          disabled={busy || answered < blocking.length}
+          disabled={busy || answered < blocking.length || run.readOnly}
+          title={run.readOnly ? "A reference run cannot be answered" : undefined}
           onClick={async () => {
             setBusy(true);
-            await api.answers(run.runId, {
-              answers: Object.entries(answers).map(([questionId, text]) => ({ questionId, text })),
-            });
-            setBusy(false);
-            onSubmitted();
+            try {
+              await api.answers(run.runId, {
+                answers: Object.entries(answers).map(([questionId, text]) => ({ questionId, text })),
+              });
+              onSubmitted();
+            } catch (e) {
+              onError?.((e as Error).message);
+            } finally {
+              setBusy(false);
+            }
           }}
         >
           {busy ? "Saving…" : "Save answers"}

@@ -55,7 +55,23 @@ async function main(): Promise<void> {
   }
 
   const server = createStudioServer({ config, runner, preflight, version: VERSION });
-  await server.listen(config.port, config.host);
+  try {
+    await server.listen(config.port, config.host);
+  } catch (err) {
+    // A port already in use arrives as an unhandled 'error' event and a stack trace,
+    // which reads as a Studio crash. It is usually an earlier Studio still running,
+    // and the frontend then proxies happily to THAT one — pointed at another repo.
+    if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
+      console.error(
+        `\nPort ${config.port} is already in use — most likely an earlier Studio backend.\n` +
+          `Stop it, or start this one on another port:\n\n  --port <n>\n\n` +
+          "Leaving it running is worse than it looks: the dev frontend proxies to whatever\n" +
+          "answers on that port, which may be a Studio pointed at a different repo.\n",
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
   console.log(`\n  http://${config.host}:${config.port}\n`);
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {

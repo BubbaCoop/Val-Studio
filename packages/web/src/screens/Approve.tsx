@@ -11,7 +11,13 @@ import type { RunDetail } from "@valiify/studio-shared";
 import { api } from "../api.ts";
 import { Button, Panel, Tag, Verbatim } from "../components/ui.tsx";
 
-export function Approve({ run, onApproved }: { run: RunDetail; onApproved: () => void }) {
+export function Approve({
+  run, onApproved, onError,
+}: {
+  run: RunDetail;
+  onApproved: () => void;
+  onError?: (message: string) => void;
+}) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const latest = run.concepts.at(-1);
@@ -68,12 +74,21 @@ export function Approve({ run, onApproved }: { run: RunDetail; onApproved: () =>
       <div className="flex justify-end">
         <Button
           kind="primary"
-          disabled={busy || !message.trim()}
+          disabled={busy || !message.trim() || run.readOnly}
+          title={run.readOnly ? "A reference run cannot be approved" : undefined}
           onClick={async () => {
             setBusy(true);
-            await api.approve(run.runId, message);
-            setBusy(false);
-            onApproved();
+            try {
+              await api.approve(run.runId, message);
+              onApproved();
+            } catch (e) {
+              // A failed dispatch must be visible: nothing else on this screen moves
+              // until the pipeline writes a file, so a silent failure looks like a
+              // gate that is simply taking a long time.
+              onError?.((e as Error).message);
+            } finally {
+              setBusy(false);
+            }
           }}
         >
           {busy ? "Running…" : `Approve — /design build ${run.relPath}`}

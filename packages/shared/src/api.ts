@@ -147,6 +147,8 @@ export interface BriefSchemaResponse {
 
 export interface RunListResponse {
   runs: RunSummary[];
+  /** Roots that could not be read — rendered, never collapsed into an empty list. */
+  errors: string[];
 }
 
 export interface ApiError {

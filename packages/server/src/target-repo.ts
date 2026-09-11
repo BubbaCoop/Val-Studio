@@ -8,7 +8,7 @@
  * The config is re-read on every request rather than cached at startup, so a repo
  * edited underneath a running Studio is picked up without a restart.
  */
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { SurfaceSummary, TargetRepoInfo, ValConfig } from "@valiify/studio-shared";
@@ -76,12 +76,4 @@ export async function readTargetRepo(targetRepo: string): Promise<TargetRepoInfo
 /** Absolute path to a val-core design tool inside the TARGET repo (val-init copies them there). */
 export function designToolPath(targetRepo: string, config: ValConfig, tool: string): string {
   return resolve(targetRepo, toolsDirOf(config), "design", tool);
-}
-
-export async function fileMtime(path: string): Promise<string> {
-  try {
-    return (await stat(path)).mtime.toISOString();
-  } catch {
-    return new Date(0).toISOString();
-  }
 }

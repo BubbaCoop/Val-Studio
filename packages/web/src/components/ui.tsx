@@ -48,6 +48,27 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="py-6 text-center text-sm text-ink-3">{children}</p>;
 }
 
+/**
+ * A failure the user has to see.
+ *
+ * Studio's rule is that nothing fails quietly: an unreachable backend, an unreadable
+ * config, a dropped event stream, a refused write. Each of those used to leave a
+ * screen sitting on a spinner or an empty list, which is indistinguishable from a
+ * pipeline that is simply taking its time.
+ */
+export function Banner({ title, children, tone = "blocking" }: { title: string; children: ReactNode; tone?: "blocking" | "draft" }) {
+  const tones = {
+    blocking: "border-blocking bg-blocking/5 text-blocking",
+    draft: "border-draft bg-draft/5 text-draft",
+  }[tone];
+  return (
+    <div className={`border-l-2 border ${tones} p-3`}>
+      <p className="text-xs font-semibold">{title}</p>
+      <div className="mt-1 text-xs text-ink-2">{children}</div>
+    </div>
+  );
+}
+
 /** Monospace, pre-wrapped, verbatim. Used wherever the pipeline's own words are shown. */
 export function Verbatim({ text }: { text: string }) {
   return <pre className="overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink">{text}</pre>;

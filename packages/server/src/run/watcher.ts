@@ -11,10 +11,11 @@
  * progress only — they never decide what stage a run is in.
  */
 import { watch, type FSWatcher } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { sep } from "node:path";
 import type { Manifest, RunEvent, RunStage } from "@valiify/studio-shared";
 import { readRunDetail } from "./reader.ts";
 import { RUN_FILES, classify, walk } from "./paths.ts";
+import type { RunRoot } from "./roots.ts";
 
 /** fs events arrive in bursts while an agent writes; coalesce before re-reading. */
 const DEBOUNCE_MS = 120;
@@ -34,26 +35,32 @@ export class RunWatcher {
   runDir: string;
   runId: string;
   emit: Emit;
+  private root: RunRoot | undefined;
   private watcher: FSWatcher | null = null;
   private timer: NodeJS.Timeout | null = null;
   private snapshot: Snapshot | null = null;
   private scanning = false;
   private rescanQueued = false;
 
-  constructor(repo: string, runDir: string, runId: string, emit: Emit) {
+  constructor(repo: string, runDir: string, runId: string, emit: Emit, root?: RunRoot) {
     this.repo = repo;
     this.runDir = runDir;
     this.runId = runId;
     this.emit = emit;
+    this.root = root;
   }
 
   async start(): Promise<void> {
     await this.scan(true);
     try {
       this.watcher = watch(this.runDir, { recursive: true }, () => this.schedule());
-    } catch {
+    } catch (err) {
       // Recursive watching is unavailable on some platforms; a slow poll still
-      // keeps the run observable rather than silently reporting a frozen gate.
+      // keeps the run observable rather than silently reporting a frozen gate. Say so
+      // — an unannounced downgrade to polling looks exactly like a slow pipeline.
+      console.warn(
+        `[studio] cannot watch ${this.runDir} (${(err as Error).message}); polling every 2s instead.`,
+      );
       const poll = setInterval(() => this.schedule(), 2000);
       this.watcher = { close: () => clearInterval(poll) } as unknown as FSWatcher;
     }
@@ -78,7 +85,7 @@ export class RunWatcher {
     }
     this.scanning = true;
     try {
-      const detail = await readRunDetail(this.repo, this.runDir);
+      const detail = await readRunDetail(this.repo, this.runDir, this.root);
       const files = new Set(await walk(this.runDir));
       const at = new Date().toISOString();
       const manifest = detail.manifest as Manifest | null;
@@ -99,12 +106,12 @@ export class RunWatcher {
 
       for (const f of files) {
         if (!prev.files.has(f)) {
-          this.emit({ type: "file", runId: this.runId, at, change: "added", path: f, artefact: classify(f) as never });
+          this.emit({ type: "file", runId: this.runId, at, change: "added", path: f, artefact: classify(f) });
         }
       }
       for (const f of prev.files) {
         if (!files.has(f)) {
-          this.emit({ type: "file", runId: this.runId, at, change: "removed", path: f, artefact: classify(f) as never });
+          this.emit({ type: "file", runId: this.runId, at, change: "removed", path: f, artefact: classify(f) });
         }
       }
 
@@ -144,6 +151,17 @@ export class RunWatcher {
       }
 
       this.snapshot = next;
+    } catch (err) {
+      // A scan that dies takes the run's live updates with it, and the client sees a
+      // gate that never moves. Report it and keep the watcher alive.
+      console.error(`[studio] scan of ${this.runDir} failed: ${(err as Error).message}`);
+      this.emit({
+        type: "lifecycle",
+        runId: this.runId,
+        at: new Date().toISOString(),
+        phase: "failed",
+        error: `Studio could not read this run directory: ${(err as Error).message}`,
+      });
     } finally {
       this.scanning = false;
       if (this.rescanQueued) {
@@ -188,36 +206,55 @@ function stageEvidence(stage: RunStage, files: Set<string>, manifest: Manifest |
 }
 
 /**
- * Watches the runs root so the run LIST stays live — a run created by the CLI
+ * Watches every runs root so the run LIST stays live — a run created by the CLI
  * appears in Studio without a refresh.
+ *
+ * A root that cannot be watched is announced, not silently downgraded: a root that is
+ * simply not on disk, and one that Studio quietly stopped watching, look identical
+ * from the UI and only one of them is fixable.
  */
 export class RunsRootWatcher {
-  private watcher: FSWatcher | null = null;
+  private watchers: FSWatcher[] = [];
   private timer: NodeJS.Timeout | null = null;
-  root: string;
+  private polling = false;
   onChange: () => void;
 
-  constructor(repo: string, runOutputDir: string, onChange: () => void) {
-    this.root = join(repo, runOutputDir);
+  constructor(onChange: () => void) {
     this.onChange = onChange;
   }
 
-  start(): void {
-    try {
-      this.watcher = watch(this.root, { recursive: true }, () => {
-        if (this.timer) clearTimeout(this.timer);
-        this.timer = setTimeout(this.onChange, 250);
-      });
-    } catch {
-      const poll = setInterval(this.onChange, 4000);
-      this.watcher = { close: () => clearInterval(poll) } as unknown as FSWatcher;
+  /** Roots are resolved from val/config.json, so starting is async. */
+  async start(roots: RunRoot[]): Promise<void> {
+    const fire = () => {
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = setTimeout(this.onChange, 250);
+    };
+    for (const root of roots) {
+      if (!root.exists) {
+        if (root.id === "runs") {
+          console.error(
+            `[studio] ${root.relDir}/ does not exist — the run list will stay empty until the pipeline creates it.`,
+          );
+        }
+        continue;
+      }
+      try {
+        this.watchers.push(watch(root.dir, { recursive: true }, fire));
+      } catch (err) {
+        console.warn(`[studio] cannot watch ${root.relDir}/ (${(err as Error).message}); polling every 4s instead.`);
+        if (!this.polling) {
+          this.polling = true;
+          const poll = setInterval(this.onChange, 4000);
+          this.watchers.push({ close: () => clearInterval(poll) } as unknown as FSWatcher);
+        }
+      }
     }
+    this.onChange();
   }
 
   stop(): void {
-    this.watcher?.close();
+    for (const w of this.watchers) w.close();
+    this.watchers = [];
     if (this.timer) clearTimeout(this.timer);
   }
 }
-
-export const runRelative = (runDir: string, abs: string): string => relative(runDir, abs);
