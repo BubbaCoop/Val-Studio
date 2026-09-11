@@ -1,0 +1,22 @@
+{
+  "name": "@valiify/studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A client for the @valiify/val-core /design pipeline. Studio authors briefs and critique findings and renders what the agents produce; it never generates markup, never writes concept files, and never bypasses a gate.",
+  "repository": { "type": "git", "url": "git+https://github.com/BubbaCoop/Val-Studio.git" },
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "workspaces": ["packages/shared", "packages/server", "packages/web"],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm run dev -w @valiify/studio-server",
+    "dev:web": "npm run dev -w @valiify/studio-web",
+    "build": "npm run build -w @valiify/studio-web",
+    "typecheck": "tsc -b packages/shared packages/server packages/web",
+    "test": "node --test packages/server/test/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

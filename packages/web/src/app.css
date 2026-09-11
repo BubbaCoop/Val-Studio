@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+/*
+ * Studio's own chrome. Deliberately NOT built from @valiify/shortapp-ui or
+ * @valiify/dashboard-ui: those are the TARGET repo's libraries, read from disk via
+ * val/config.json. Baking one of them into Studio would hardcode a library into the
+ * client whose whole job is to discover the library it is pointed at.
+ *
+ * The concept iframe is styled only by the pipeline's concept.css, served from the
+ * target repo. Nothing in this file reaches it.
+ */
+@theme {
+  --color-ink: #1a1a1a;
+  --color-ink-2: #54565b;
+  --color-ink-3: #6f7276;
+  --color-line: #d9d9d4;
+  --color-ground: #f6f6f4;
+  --color-panel: #ffffff;
+  --color-blocking: #c0362c;
+  --color-draft: #b4791c;
+  --color-ok: #2f6b4f;
+}
+
+html, body, #root { height: 100%; }
+body { background: var(--color-ground); color: var(--color-ink); }
