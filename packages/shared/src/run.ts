@@ -89,8 +89,19 @@ export interface GitState {
    * and the verified package. Never offered at an intermediate gate.
    */
   commitOffered: boolean;
-  /** Present when commitOffered is false and the run is dirty — why it is withheld. */
+  /** Present when commitOffered is false — why. Always set when it is false and the run exists. */
   commitWithheldReason?: string;
+  /**
+   * The run directory is excluded by .gitignore, so git will never report it dirty and
+   * it can never be committed as it stands.
+   *
+   * This is the normal case: `val/runs/*` is typically ignored, which is precisely why
+   * the tracked reference runs live somewhere else. Surfaced rather than hidden — a
+   * designer who wants a durable record should learn that path, not find a dead button.
+   */
+  ignoredByGit?: boolean;
+  /** The .gitignore line that excludes it, as `git check-ignore -v` reports it. */
+  ignoreRule?: string;
 }
 
 /**
@@ -137,6 +148,21 @@ export interface RunSummary {
   manifestError?: string;
   /** Set when the run directory itself could not be listed. Never silently empty. */
   readError?: string;
+  /**
+   * The most recent mtime of any file in the run directory.
+   *
+   * A run's manifest says `running` until a gate writes otherwise, so a session that
+   * was killed leaves it saying `running` for ever. Nothing on disk can express
+   * "abandoned", and Studio does not write into the run directory to say so — the run
+   * directory is the pipeline's. So staleness is a DISPLAY fact, derived here: a run
+   * that claims to be running and has not touched a file in a while is shown as stale,
+   * with the time it last did something.
+   */
+  lastActivityAt: string;
+  /** manifest.status is `running` and nothing has changed for `staleAfterMs`. */
+  stale: boolean;
+  /** The threshold used, so the UI can say how long it waited. */
+  staleAfterMs: number;
   /** Which root this run was found under. */
   root: RunRootId;
   /**

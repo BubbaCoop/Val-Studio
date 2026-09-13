@@ -27,7 +27,7 @@ async function main(): Promise<void> {
 
   const runner: DesignRunner =
     config.runner === "agent-sdk"
-      ? new AgentSdkRunner()
+      ? new AgentSdkRunner({ model: config.model })
       : new StubDesignRunner({
           fixture: process.env.VAL_STUDIO_STUB_FIXTURE,
           stepMs: Number(process.env.VAL_STUDIO_STUB_STEP_MS ?? 700),
@@ -38,7 +38,12 @@ async function main(): Promise<void> {
   console.log(`  target   ${config.targetRepo}`);
   console.log(`  library  ${target.library.displayName ?? target.library.name} (${target.library.package ?? "no package"})`);
   console.log(`  surfaces ${target.surfaces.map((s) => s.id).join(", ") || "(none configured)"}`);
-  console.log(`  runner   ${runner.kind}`);
+  console.log(`  runner   ${runner.kind}${config.model ? ` (model ${config.model})` : " (model: the CLI default)"}`);
+  if (runner.kind === "agent-sdk") {
+    // The floor, measured: a run that stops at Gate 1 on Sonnet 4.5 cost $1.23, almost
+    // all of it cache reads. Nobody should discover that from a bill.
+    console.log("  note     a real run is not cheap — see CLAUDE.md, 'What a run costs'");
+  }
 
   process.stdout.write("  preflight… ");
   const preflight = await runner.preflight(config.targetRepo);

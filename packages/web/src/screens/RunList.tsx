@@ -38,6 +38,7 @@ export function RunList({ runs, onOpen }: { runs: RunSummary[]; onOpen: (runId: 
                   <Tag tone={TONE[r.stage] ?? "neutral"}>{r.stage}</Tag>
                   <Tag>v{r.conceptVersions}</Tag>
                   {r.loops.feedback > 0 && <Tag>{r.loops.feedback} feedback</Tag>}
+                  {r.stale && <Tag tone="draft">stale</Tag>}
                   {r.root === "fixtures" && <Tag tone="draft">reference</Tag>}
                   {r.manifestMissing && <Tag tone="draft">no manifest</Tag>}
                   {r.manifestError && <Tag tone="blocking">manifest unreadable</Tag>}
@@ -89,6 +90,18 @@ export function CommitPanel({
           This is a read-only reference run. It is already part of the target repo's history; Studio does not
           commit into it.
         </p>
+      ) : git.ignoredByGit ? (
+        /*
+         * The common case, and the one that used to ship as a dead button: the runs
+         * directory is excluded by .gitignore, so git never sees the run as changed.
+         * Say so, name the rule, and point at the path that does work.
+         */
+        <div className="mt-3 border-l-2 border-draft bg-draft/5 p-2">
+          <p className="text-xs text-ink-2">{git.commitWithheldReason}</p>
+          {git.ignoreRule && (
+            <p className="mt-1 font-mono text-[10px] text-ink-3">git check-ignore: {git.ignoreRule}</p>
+          )}
+        </div>
       ) : git.commitOffered ? (
         <div className="mt-3">
           <p className="text-xs text-ink-2">

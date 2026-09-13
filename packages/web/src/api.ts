@@ -67,6 +67,11 @@ export const api = {
     if (res.status === 200 || res.status === 422) return parsed as SubmitFeedbackResponse;
     throw new ApiError(res.status, parsed?.error ?? res.statusText, parsed?.detail);
   },
+  /** Stop a run Studio itself started. A terminal-driven run is not Studio's to stop. */
+  stop: async (runId: string): Promise<{ stopped: boolean; reason?: string }> => {
+    const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}/stop`, { method: "POST" });
+    return (await res.json()) as { stopped: boolean; reason?: string };
+  },
   approve: (runId: string, message: string) =>
     post<{ runId: string; prompt: string }>(`/api/runs/${encodeURIComponent(runId)}/approve`, { message }),
   /**

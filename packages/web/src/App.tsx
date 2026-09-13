@@ -153,6 +153,7 @@ function RunScreen({ runId }: { runId: string }) {
         <div className="flex items-center gap-1.5">
           {run.surface && <Tag>{run.surface}</Tag>}
           {run.readOnly && <Tag tone="draft">read-only reference run</Tag>}
+          {run.stale && <Tag tone="draft">stale</Tag>}
           <Tag tone={connected ? "ok" : "blocking"}>{connected ? "live" : "disconnected"}</Tag>
         </div>
       </div>
@@ -178,6 +179,22 @@ function RunScreen({ runId }: { runId: string }) {
         </Banner>
       )}
       {run.readError && <Banner tone="blocking" title="Cannot read the run directory">{run.readError}</Banner>}
+      {run.stale && (
+        /*
+         * The manifest says `running`; nothing has changed in a long time. Studio does
+         * not write into the run directory to record that, because the directory is
+         * the pipeline's — so this is said here, in the display, with the evidence.
+         */
+        <Banner tone="draft" title="This run says it is running, but nothing has happened for a while">
+          The last file in the run directory changed at{" "}
+          <strong>{new Date(run.lastActivityAt).toLocaleString()}</strong> — more than{" "}
+          {Math.round(run.staleAfterMs / 60000)} minutes ago. The session driving it has probably ended.
+          <span className="mt-1 block text-[10px]">
+            manifest.status is still "{run.status}" and will stay that way: only a gate rewrites it, and
+            Studio does not write into a run directory it does not own.
+          </span>
+        </Banner>
+      )}
       {run.readOnly && (
         <Banner tone="draft" title="Reference run — open for reading only">
           This run lives under the target repo's tracked fixtures. Studio refuses every write against it: no

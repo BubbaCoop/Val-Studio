@@ -33,6 +33,31 @@ import { runKey, type RunRoot } from "./roots.ts";
 
 const FINDING_COLUMNS = ["id", "block", "severity", "rule", "finding", "fix"];
 
+/**
+ * How long a run may claim to be `running` without touching a file before Studio shows
+ * it as stale. Generous on purpose: a concept architect legitimately runs for many
+ * minutes, and one real run in the target repo records a stage killed by a watchdog at
+ * 600s. Calling a working stage dead is worse than waiting.
+ */
+export const DEFAULT_STALE_AFTER_MS = 15 * 60_000;
+
+/** Statuses that assert something is happening right now. The rest are legitimate waits. */
+const IN_FLIGHT_STATUSES = new Set(["running"]);
+
+/** The most recent mtime anywhere in the run directory, including the directory itself. */
+async function lastActivity(runDir: string): Promise<number> {
+  let newest = await stat(runDir)
+    .then((s) => s.mtimeMs)
+    .catch(() => 0);
+  for (const rel of await walk(runDir)) {
+    const m = await stat(join(runDir, rel))
+      .then((s) => s.mtimeMs)
+      .catch(() => 0);
+    if (m > newest) newest = m;
+  }
+  return newest;
+}
+
 async function readIf(path: string): Promise<string | null> {
   try {
     return await readFile(path, "utf8");
@@ -128,7 +153,12 @@ async function conceptVersions(runDir: string): Promise<ConceptVersion[]> {
  * `root` says which runs root the directory came from; omit it and the run is treated
  * as a live, writable one, which is what a direct call with a path means.
  */
-export async function readRunSummary(repo: string, runDir: string, root?: RunRoot): Promise<RunSummary> {
+export async function readRunSummary(
+  repo: string,
+  runDir: string,
+  root?: RunRoot,
+  staleAfterMs: number = DEFAULT_STALE_AFTER_MS,
+): Promise<RunSummary> {
   const dirName = basename(runDir);
   const m = await readJson<Manifest>(join(runDir, RUN_FILES.manifest));
   const manifest = m.value;
@@ -164,9 +194,10 @@ export async function readRunSummary(repo: string, runDir: string, root?: RunRoo
     hasWriteup: existsSync(join(runDir, RUN_FILES.writeup)),
   });
 
-  const mtime = await stat(runDir)
-    .then((s) => s.mtime.toISOString())
-    .catch(() => new Date(0).toISOString());
+  const activityMs = await lastActivity(runDir);
+  const status = manifest?.status ?? "running";
+  // Display-only. Nothing is written to the run directory to record this.
+  const stale = IN_FLIGHT_STATUSES.has(String(status)) && Date.now() - activityMs > staleAfterMs;
 
   return {
     // The directory is the identity — see RunSummary.runId. A fixture's is namespaced
@@ -176,13 +207,16 @@ export async function readRunSummary(repo: string, runDir: string, root?: RunRoo
     path: runDir,
     relPath: relative(repo, runDir),
     surface: manifest?.surface,
-    status: manifest?.status ?? "running",
+    status,
     stage,
     loops: loopState(manifest),
     conceptVersions: concepts.length,
     hasApproval: existsSync(join(runDir, RUN_FILES.approval)),
     hasPackage: existsSync(join(runDir, RUN_FILES.packageDir)),
-    updatedAt: mtime,
+    updatedAt: new Date(activityMs || 0).toISOString(),
+    lastActivityAt: new Date(activityMs || 0).toISOString(),
+    stale,
+    staleAfterMs,
     manifestMissing: m.missing,
     manifestError: m.error,
     readError,
@@ -197,8 +231,13 @@ function briefIsBlocked(brief: string): boolean {
   return !!round?.questions.some((q) => q.blocking);
 }
 
-export async function readRunDetail(repo: string, runDir: string, root?: RunRoot): Promise<RunDetail> {
-  const summary = await readRunSummary(repo, runDir, root);
+export async function readRunDetail(
+  repo: string,
+  runDir: string,
+  root?: RunRoot,
+  staleAfterMs?: number,
+): Promise<RunDetail> {
+  const summary = await readRunSummary(repo, runDir, root, staleAfterMs);
   const manifest = (await readJson<Manifest>(join(runDir, RUN_FILES.manifest))).value;
 
   const briefText = await readIf(join(runDir, RUN_FILES.brief));
@@ -319,7 +358,11 @@ export async function readRunDetail(repo: string, runDir: string, root?: RunRoot
  * and "the configured runOutputDir does not exist" are different problems, and only
  * one of them is the user's to fix.
  */
-export async function listRuns(repo: string, roots: RunRoot[]): Promise<{ runs: RunSummary[]; errors: string[] }> {
+export async function listRuns(
+  repo: string,
+  roots: RunRoot[],
+  staleAfterMs?: number,
+): Promise<{ runs: RunSummary[]; errors: string[] }> {
   const runs: RunSummary[] = [];
   const errors: string[] = [];
   for (const root of roots) {
@@ -335,7 +378,9 @@ export async function listRuns(repo: string, roots: RunRoot[]): Promise<{ runs: 
     }
     runs.push(
       ...(await Promise.all(
-        entries.filter((e) => e.isDirectory()).map((e) => readRunSummary(repo, join(root.dir, e.name), root)),
+        entries
+          .filter((e) => e.isDirectory())
+          .map((e) => readRunSummary(repo, join(root.dir, e.name), root, staleAfterMs)),
       )),
     );
   }

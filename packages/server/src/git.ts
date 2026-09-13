@@ -27,6 +27,25 @@ export function commitAllowed(stage: RunStage): boolean {
   return stage === "signed-off";
 }
 
+/**
+ * Is this path excluded by .gitignore, and by which rule?
+ *
+ * Worth asking before offering a commit. A run under an ignored path never shows as
+ * dirty, so `git status` reports nothing and the action would silently do nothing —
+ * which is how a dead button gets shipped. `check-ignore -v` names the rule, so the
+ * refusal can say WHY rather than just no.
+ */
+export async function gitIgnoreRule(repo: string, rel: string): Promise<string | null> {
+  try {
+    const out = await git(repo, ["check-ignore", "-v", "--", rel]);
+    return out.trim() || null;
+  } catch {
+    // Exit 1 means "not ignored"; anything else means git could not answer, and a
+    // path we cannot classify is treated as not ignored so the normal rules apply.
+    return null;
+  }
+}
+
 export async function readGitState(repo: string, runDir: string, stage: RunStage): Promise<GitState> {
   const rel = relative(repo, runDir) || ".";
   try {
@@ -62,20 +81,48 @@ export async function readGitState(repo: string, runDir: string, stage: RunStage
     /* no history for this path */
   }
 
+  const ignore = await gitIgnoreRule(repo, rel);
   const allowed = commitAllowed(stage);
   const hasUncommittedChanges = dirtyPaths.length > 0;
+  const offered = allowed && hasUncommittedChanges && !ignore;
+
   return {
     isRepo: true,
     branch,
     dirtyPaths,
     hasUncommittedChanges,
     lastCommit,
-    commitOffered: allowed && hasUncommittedChanges,
-    commitWithheldReason:
-      !allowed && hasUncommittedChanges
-        ? `This run is at "${stage}". A run is committed at signed-off, where the directory holds the sealed approval and the verified package — never at an intermediate gate.`
-        : undefined,
+    commitOffered: offered,
+    ignoredByGit: !!ignore,
+    ignoreRule: ignore ?? undefined,
+    commitWithheldReason: offered ? undefined : withheldReason({ stage, allowed, hasUncommittedChanges, ignore, rel }),
   };
+}
+
+/** Say plainly why the commit is not on offer. Never just "no". */
+function withheldReason(o: {
+  stage: RunStage;
+  allowed: boolean;
+  hasUncommittedChanges: boolean;
+  ignore: string | null;
+  rel: string;
+}): string | undefined {
+  if (o.ignore) {
+    return (
+      `${o.rel} is excluded from git by ${o.ignore.split("\t")[0]}, so git will never see it as changed and ` +
+      `committing it here would do nothing. That exclusion is why a repo keeps its reference runs somewhere ` +
+      `tracked instead. To keep a durable record of this run, copy it into the tracked fixtures directory, or ` +
+      `remove the ignore rule if every run should be committed.`
+    );
+  }
+  if (!o.allowed) {
+    return (
+      `This run is at "${o.stage}". A run is committed at signed-off, where the directory holds the sealed ` +
+      `approval and the verified package — never at an intermediate gate.`
+    );
+  }
+  if (!o.hasUncommittedChanges) return "Nothing to commit — this run directory is already clean.";
+  return undefined;
 }
 
 export interface CommitResult {
@@ -101,6 +148,10 @@ export async function commitRun(
   const rel = relative(repo, runDir) || ".";
   const state = await readGitState(repo, runDir, stage);
   if (!state.isRepo) return { committed: false, refusedReason: "The target repo is not a git work tree." };
+  // An ignored run directory is the usual case, and `git add` on it is a silent no-op.
+  if (state.ignoredByGit) {
+    return { committed: false, refusedReason: state.commitWithheldReason };
+  }
   if (!state.hasUncommittedChanges) {
     return { committed: false, refusedReason: "Nothing to commit — this run directory is already clean." };
   }

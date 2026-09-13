@@ -20,6 +20,15 @@ export interface RunnerContext {
   /** Path relative to the target repo — what `/design build <run-dir>` is invoked with. */
   runRelPath: string;
   runId: string;
+  /**
+   * Absolute directories this run may write into — the confinement bound, set by the
+   * caller because only it knows the configured runs root.
+   *
+   * `build` gets the run directory alone. `design` gets the runs root plus the briefs
+   * directory, because Gate 0 — not Studio — names the run directory, and narrowing
+   * further would mean predicting a name the pipeline owns.
+   */
+  writeRoots: string[];
 }
 
 /** Token-level progress only. Never the record of which stage a run is in. */
@@ -37,11 +46,25 @@ export interface RunnerInvocation {
   signal?: AbortSignal;
 }
 
+/** What a run cost. Reported so the floor stays visible — it is not small. */
+export interface RunnerUsage {
+  costUSD: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Usually the bulk of it: the methodology and agent files re-sent every turn. */
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  models: string[];
+}
+
 export interface RunnerResult {
   ok: boolean;
   /** Whatever the pipeline said last. Rendered verbatim; never parsed for state. */
   finalText?: string;
   error?: string;
+  usage?: RunnerUsage;
+  /** Tool calls the confinement policy refused. Surfaced: a silently hobbled run looks like a slow one. */
+  refusals?: { tool: string; reason: string }[];
 }
 
 export interface DesignRunner {

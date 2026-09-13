@@ -15,6 +15,9 @@ import { join } from "node:path";
 import type { BriefSchemaField } from "@valiify/studio-shared";
 import { PATTERNS, RUN_FILES, numbered } from "./run/paths.ts";
 
+/** Where Studio writes the requester's brief. Also a write root for a design run. */
+export const BRIEFS_DIR = "val/briefs";
+
 export const slugify = (s: string): string =>
   s
     .toLowerCase()
@@ -65,7 +68,7 @@ export async function writeBrief(
   slug: string,
   markdown: string,
 ): Promise<{ absPath: string; relPath: string }> {
-  const relPath = `val/briefs/brief-${slug}.md`;
+  const relPath = `${BRIEFS_DIR}/brief-${slug}.md`;
   const absPath = join(targetRepo, relPath);
   await mkdir(join(absPath, ".."), { recursive: true });
   await writeFile(absPath, markdown, "utf8");

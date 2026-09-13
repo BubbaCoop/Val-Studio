@@ -30,9 +30,9 @@ import { RunsRootWatcher } from "../run/watcher.ts";
 import { parseConcept, prepareConceptForFrame } from "../parse/concept.ts";
 import { prepareRound, writeRound } from "../feedback/writer.ts";
 import { runFeedbackCheck } from "../feedback/check.ts";
-import { expectedRunId, renderBrief, slugify, writeAnswers, writeBrief } from "../inputs.ts";
+import { BRIEFS_DIR, expectedRunId, renderBrief, slugify, writeAnswers, writeBrief } from "../inputs.ts";
 import { commitRun } from "../git.ts";
-import type { DesignRunner } from "../runner/types.ts";
+import type { DesignRunner, RunnerResult } from "../runner/types.ts";
 import { RunChannels } from "./sse.ts";
 
 const require = createRequire(import.meta.url);
@@ -61,6 +61,16 @@ export function createStudioServer(deps: StudioServerDeps) {
   const { config, runner } = deps;
   const channels = new RunChannels(config.targetRepo);
 
+  /**
+   * Runs Studio itself started, so they can be stopped.
+   *
+   * Only these. A run someone drives from a terminal is not ours to stop, and Studio
+   * has no way to reach it — which is exactly why an abandoned run is surfaced as
+   * STALE rather than recorded as stopped: the run directory cannot express it, and
+   * Studio does not write into the run directory to say so.
+   */
+  const inFlight = new Map<string, AbortController>();
+
   /** The configured roots, re-read so a config edited underneath Studio is picked up. */
   async function roots(): Promise<RunRoot[]> {
     const { config: val } = await readValConfig(config.targetRepo);
@@ -74,7 +84,7 @@ export function createStudioServer(deps: StudioServerDeps) {
 
   const rootWatcher = new RunsRootWatcher(() => {
     void (async () => {
-      const { runs, errors } = await listRuns(config.targetRepo, await roots());
+      const { runs, errors } = await listRuns(config.targetRepo, await roots(), config.staleAfterMs);
       for (const e of errors) console.error(`[studio] ${e}`);
       channels.broadcastGlobal({ type: "runs", at: new Date().toISOString(), runs, errors });
     })().catch((err) => console.error(`[studio] run list failed: ${(err as Error).message}`));
@@ -152,7 +162,7 @@ export function createStudioServer(deps: StudioServerDeps) {
     if (path === "/api/runs" && req.method === "GET") {
       // `errors` travels with the list: an unreadable runs root must not look like
       // "no runs yet".
-      return void json(res, 200, await listRuns(config.targetRepo, await roots()));
+      return void json(res, 200, await listRuns(config.targetRepo, await roots(), config.staleAfterMs));
     }
 
     if (path === "/api/events") return void channels.attachGlobal(res);
@@ -184,7 +194,7 @@ export function createStudioServer(deps: StudioServerDeps) {
       }
 
       if (!rest.length && req.method === "GET") {
-        return void json(res, 200, await readRunDetail(config.targetRepo, dir, root));
+        return void json(res, 200, await readRunDetail(config.targetRepo, dir, root, config.staleAfterMs));
       }
 
       // The concept, prepared for the iframe: stylesheet repointed, overlay bridge added.
@@ -225,7 +235,7 @@ export function createStudioServer(deps: StudioServerDeps) {
         if (!payload.answers?.length) return void fail(res, 400, "No answers supplied");
         // Verbatim — this is what the pipeline re-reads.
         const written = await writeAnswers(dir, payload.answers, payload.note);
-        return void json(res, 200, { ...written, run: await readRunDetail(config.targetRepo, dir, root) });
+        return void json(res, 200, { ...written, run: await readRunDetail(config.targetRepo, dir, root, config.staleAfterMs) });
       }
 
       if (rest[0] === "feedback" && req.method === "POST") {
@@ -238,10 +248,25 @@ export function createStudioServer(deps: StudioServerDeps) {
         return void (await approve(req, res, runId, dir));
       }
 
+      if (rest[0] === "stop" && req.method === "POST") {
+        const ctl = inFlight.get(runId);
+        if (!ctl) {
+          return void json(res, 409, {
+            stopped: false,
+            reason:
+              "Studio is not driving this run. A run started from a terminal belongs to that session; Studio can only report it as stale, never stop it.",
+          });
+        }
+        ctl.abort();
+        inFlight.delete(runId);
+        channels.lifecycle(runId, "stopped", { error: "stopped by the operator" });
+        return void json(res, 200, { stopped: true });
+      }
+
       if (rest[0] === "commit" && req.method === "POST") {
         if (refuseWrite()) return;
         const payload = await body<CommitRunRequest>(req);
-        const detail = await readRunDetail(config.targetRepo, dir, root);
+        const detail = await readRunDetail(config.targetRepo, dir, root, config.staleAfterMs);
         // commitRun refuses anything that is not signed-off; the stage comes from
         // the run directory, so this cannot be talked into committing early.
         const result = await commitRun(config.targetRepo, dir, detail.stage, payload.message);
@@ -250,6 +275,27 @@ export function createStudioServer(deps: StudioServerDeps) {
     }
 
     return void fail(res, 404, "Not found");
+  }
+
+  /**
+   * Report how a run ended — and what it cost, which is never small. A policy refusal
+   * is reported too: a run hobbled by confinement looks exactly like a slow one.
+   */
+  function finish(runId: string, command: string, r: RunnerResult): void {
+    inFlight.delete(runId);
+    if (r.usage) {
+      channels.progress(runId, {
+        text:
+          `run cost $${r.usage.costUSD.toFixed(2)} — ${r.usage.outputTokens} output, ` +
+          `${r.usage.cacheReadTokens} cache-read, ${r.usage.cacheCreationTokens} cache-creation tokens ` +
+          `(${r.usage.models.join(", ")})`,
+        tokens: { input: r.usage.inputTokens, output: r.usage.outputTokens },
+      });
+    }
+    for (const refusal of r.refusals ?? []) {
+      channels.progress(runId, { text: `policy refused ${refusal.tool}: ${refusal.reason}` });
+    }
+    channels.lifecycle(runId, r.ok ? "finished" : "failed", { command, error: r.error });
   }
 
   // ---- handlers ----------------------------------------------------------------
@@ -275,16 +321,30 @@ export function createStudioServer(deps: StudioServerDeps) {
     const runId = expectedRunId(slug);
     const runRelPath = join(target.runOutputDir, runId);
 
+    // Gate 0 names the run directory, not Studio, so a design run's writes are bounded
+    // by the runs root plus the briefs directory rather than by one run directory.
+    const writeRoots = [
+      resolve(config.targetRepo, target.runOutputDir),
+      resolve(config.targetRepo, BRIEFS_DIR),
+    ];
+
     // Fire and forget: the run's progress reaches the client over SSE, sourced from
     // the run directory. Gate 0 — including manifest.json — belongs to the pipeline.
+    const ctl = new AbortController();
+    inFlight.set(runId, ctl);
+    channels.lifecycle(runId, "started", { command: prompt });
     void runner
       .design({
         prompt,
-        ctx: { targetRepo: config.targetRepo, runDir: join(config.targetRepo, runRelPath), runRelPath, runId },
+        ctx: { targetRepo: config.targetRepo, runDir: join(config.targetRepo, runRelPath), runRelPath, runId, writeRoots },
         onProgress: (p) => channels.progress(runId, p),
+        signal: ctl.signal,
       })
-      .then((r) => channels.lifecycle(runId, r.ok ? "finished" : "failed", { command: prompt, error: r.error }))
-      .catch((e) => channels.lifecycle(runId, "failed", { command: prompt, error: (e as Error).message }));
+      .then((r) => finish(runId, prompt, r))
+      .catch((e) => {
+        inFlight.delete(runId);
+        channels.lifecycle(runId, "failed", { command: prompt, error: (e as Error).message });
+      });
 
     const dir = join(config.targetRepo, runRelPath);
     const response: CreateRunResponse = {
@@ -292,7 +352,7 @@ export function createStudioServer(deps: StudioServerDeps) {
       relPath: runRelPath,
       briefPath: brief.relPath,
       prompt,
-      run: existsSync(dir) ? await readRunDetail(config.targetRepo, dir) : null,
+      run: existsSync(dir) ? await readRunDetail(config.targetRepo, dir, undefined, config.staleAfterMs) : null,
     };
     json(res, 202, response);
   }
@@ -329,14 +389,14 @@ export function createStudioServer(deps: StudioServerDeps) {
       round: prepared.round.round,
       validation,
       accepted: accepted && !payload.dryRun,
-      run: await readRunDetail(config.targetRepo, dir, root),
+      run: await readRunDetail(config.targetRepo, dir, root, config.staleAfterMs),
     };
     json(res, accepted ? 200 : 422, response);
   }
 
   async function approve(req: IncomingMessage, res: ServerResponse, runId: string, dir: string): Promise<void> {
     const payload = await body<ApproveRequest>(req);
-    const detail = await readRunDetail(config.targetRepo, dir);
+    const detail = await readRunDetail(config.targetRepo, dir, undefined, config.staleAfterMs);
     const target = await readTargetRepo(config.targetRepo);
 
     const runRelPath = relative(config.targetRepo, dir);
@@ -344,16 +404,23 @@ export function createStudioServer(deps: StudioServerDeps) {
     // Invoking /design build IS the approval. Studio does not write 04-approval.md
     // and does not compute the sha256 — Gate 4b does both.
     const prompt = `/design build ${runRelPath}\n\n${payload.message ?? ""}`.trim();
+    // A build knows its run directory exactly, so it is confined to that one.
+    const ctl = new AbortController();
+    inFlight.set(runId, ctl);
+    channels.lifecycle(runId, "started", { command: prompt });
     void runner
       .build({
         prompt,
-        ctx: { targetRepo: config.targetRepo, runDir: dir, runRelPath, runId },
+        ctx: { targetRepo: config.targetRepo, runDir: dir, runRelPath, runId, writeRoots: [dir] },
         onProgress: (p) => channels.progress(runId, p),
+        signal: ctl.signal,
       })
-      .then((r) => channels.lifecycle(runId, r.ok ? "finished" : "failed", { command: prompt, error: r.error }))
-      .catch((e) => channels.lifecycle(runId, "failed", { command: prompt, error: (e as Error).message }));
+      .then((r) => finish(runId, prompt, r))
+      .catch((e) => {
+        inFlight.delete(runId);
+        channels.lifecycle(runId, "failed", { command: prompt, error: (e as Error).message });
+      });
 
-    channels.lifecycle(runId, "started", { command: prompt });
     json(res, 202, { runId, prompt, stage: detail.stage, runOutputDir: target.runOutputDir });
   }
 
@@ -370,6 +437,11 @@ export function createStudioServer(deps: StudioServerDeps) {
       });
     },
     close: () => {
+      for (const [runId, ctl] of inFlight) {
+        ctl.abort();
+        channels.lifecycle(runId, "stopped", { error: "the Studio backend shut down" });
+      }
+      inFlight.clear();
       rootWatcher.stop();
       channels.close();
       server.close();

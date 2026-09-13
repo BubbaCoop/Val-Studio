@@ -26,6 +26,14 @@ export interface StudioConfig {
    * empty to list nothing but the live runs.
    */
   fixturesDir: string;
+  /**
+   * Model pinned for pipeline runs. The manifest records a model on every gate and the
+   * orchestrator treats a gate that ran on a different model as a finding, so leaving
+   * this to an inherited default would make that check meaningless.
+   */
+  model?: string;
+  /** How long a run may claim `running` without touching a file before it shows as stale. */
+  staleAfterMs: number;
 }
 
 function flag(name: string): string | undefined {
@@ -57,5 +65,7 @@ export function loadConfig(): StudioConfig {
     runner,
     strictPreflight: (flag("strict-preflight") ?? process.env.VAL_STUDIO_STRICT_PREFLIGHT ?? "1") !== "0",
     fixturesDir: flag("fixtures") ?? process.env.VAL_STUDIO_FIXTURES_DIR ?? "val/fixtures",
+    model: flag("model") ?? process.env.VAL_STUDIO_MODEL,
+    staleAfterMs: Number(flag("stale-after-ms") ?? process.env.VAL_STUDIO_STALE_AFTER_MS ?? 15 * 60_000),
   };
 }

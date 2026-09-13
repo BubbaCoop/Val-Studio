@@ -1,16 +1,22 @@
 /**
  * The startup preflight — wired for real, and fatal.
  *
- * With cwd set to the target repo and settingSources ["user","project","local"],
+ * With cwd set to the target repo and settingSources ["project"],
  * supportedAgents() returns the five design-* subagents and supportedCommands()
  * returns `design`. If either is missing the target repo was never val-inited, and
  * the pipeline would degrade to general-purpose agents — an agent carrying the full
  * tool set and none of the discipline. That is the precise failure /design refuses
  * to run into, so Studio refuses to start into it either.
  *
- * settingSources matters: without it the SDK loads no filesystem settings, the
- * repo's .claude/agents/* are never discovered, and the preflight would report a
- * missing pipeline for a repo that is in fact configured correctly.
+ * settingSources matters, and the exact value matters twice over. With none, the SDK
+ * loads no filesystem settings, the repo's .claude/agents/* are never discovered, and
+ * the preflight fails a repo that is configured correctly (measured: 0/5 agents). With
+ * "project" alone it finds all five agents and /design (measured: 5/5) WITHOUT loading
+ * the operator's ~/.claude/settings.json — so a run is confined by Studio rather than
+ * by whatever that operator happens to have approved for themselves.
+ *
+ * The preflight uses the same sources a run uses, deliberately: a preflight that
+ * verified agents the run would not load would be worse than none.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -74,9 +80,8 @@ export async function runPreflight(targetRepo: string): Promise<PreflightResult>
     prompt: prompt.stream,
     options: {
       cwd: targetRepo,
-      // Without these three the repo's own .claude/agents and .claude/commands are
-      // never loaded, and the preflight would fail a correctly configured repo.
-      settingSources: ["user", "project", "local"],
+      // Project only — the same sources a run gets. See the header.
+      settingSources: ["project"],
     },
   });
 

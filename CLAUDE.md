@@ -82,9 +82,13 @@ npm run dev -- --target '/path/to/library repo'
 interpolated into a shell string; every child process takes an argv array.)
 
 Frontend on `:4316`, backend on `:4317`, `/api` proxied. Other flags:
-`--port`, `--host`, `--runner stub|agent-sdk`, `--fixtures <dir>`,
-`--strict-preflight 0` (tests only). Env equivalents:
-`VAL_STUDIO_TARGET_REPO`, `VAL_STUDIO_RUNNER`, `VAL_STUDIO_FIXTURES_DIR`.
+`--port`, `--host`, `--runner stub|agent-sdk`, `--model <id>`, `--fixtures <dir>`,
+`--stale-after-ms <n>`, `--strict-preflight 0` (tests only). Env equivalents:
+`VAL_STUDIO_TARGET_REPO`, `VAL_STUDIO_RUNNER`, `VAL_STUDIO_MODEL`,
+`VAL_STUDIO_FIXTURES_DIR`, `VAL_STUDIO_STALE_AFTER_MS`.
+
+`--runner stub` is the default and spends nothing. `--runner agent-sdk` drives the real
+pipeline: read **What a run costs** before using it.
 
 `npm test` and `npm run typecheck` run against the real target repo and the real
 val-core tools — there is no mock run directory on purpose.
@@ -146,11 +150,63 @@ Feedback rounds are **uncapped** and counted separately from `loops.critic`. Stu
 surfaces the critic cap and never offers to raise it; it never presents feedback rounds
 as capped, not even visually.
 
+## What a run costs
+
+Measured, not estimated — one `/design` run against this repo that stops at Gate 1
+with `BRIEF: BLOCKED`, on `claude-sonnet-4-5`:
+
+| | |
+| --- | --- |
+| cost | **$1.23** |
+| wall time | 325 s, 19 turns, 24 tool calls |
+| output tokens | 13,320 |
+| cache read | 1,173,479 |
+| cache creation | 137,976 |
+| fresh input | 140 |
+
+Three things follow, and they are load-bearing:
+
+- **That is the FLOOR.** It never drew a concept, never ran the critic, never built.
+  A full brief → signed-off run is a large multiple of it.
+- **On Opus 5 the same run is roughly 5×.** The pipeline records a model per gate and
+  treats a mismatch as a finding, so Studio pins the model explicitly
+  (`--model`); leaving it to an inherited default makes that check meaningless.
+- **Almost all of it is cache reads** — the surface methodology, the five agent files
+  and CLAUDE.md re-sent on every turn. Cost scales with how much each agent reads, not
+  with how much it writes. Keep the methodology reads tight: the agents' `never-read`
+  lists (images, `*-decisions.md`, `_dashboard-archive/`) are a cost control as well as
+  a discipline. This is also the number that decides whether a hosted Studio is
+  affordable at all.
+
+## What a run is allowed to do
+
+Confinement is Studio's, not the operator's. `runner/policy.ts` is enforced in a
+**PreToolUse hook**, and that choice is forced by two measured facts:
+
+- `canUseTool` is **never consulted** once `settingSources` loads filesystem settings —
+  every tool, Bash included, is auto-allowed by whatever the operator has in
+  `~/.claude/settings.json`. A hook returning `permissionDecision: "deny"` overrides an
+  inherited allow; nothing else does.
+- **Blocking a tool does not block an action.** When a probe denied `cp`, the
+  orchestrator did the same copy with Read + Write and carried on. So the policy asks
+  where a call reads or writes, never which tool is asking.
+
+The policy: read anywhere in the target repo; write only inside the run's write roots
+(`build` gets its one run directory, `design` gets the runs root plus `val/briefs`,
+because Gate 0 — not Studio — names the run directory); no `.git`, no network, and bash
+restricted to an allow-list with no chaining, redirection or substitution, destinations
+checked separately from sources.
+
+`settingSources: ["project"]` — measured: 5/5 design agents and `/design`, without
+loading the operator's personal settings (with `[]` it is 0/5, so `project` is
+required). The repo's own checked-in `.claude/settings.json` permission rules are still
+loaded, but the deny hook overrides them.
+
 ## The preflight, and why a missing subagent is fatal
 
 `runner/preflight.ts` opens an Agent SDK session with `cwd` set to the target repo and
-`settingSources: ["user", "project", "local"]` (without those the repo's own
-`.claude/agents` are never loaded and a correctly configured repo would fail), then
+the same `settingSources: ["project"]` a run gets — deliberately the same, because a
+preflight that verified agents the run would not load would be worse than none — then
 asks `supportedAgents()` and `supportedCommands()`. It requires all five `design-*`
 subagents and `/design`, and checks that
 `.claude/agents/design-concept-architect.md`'s generated header names the same library
@@ -184,7 +240,12 @@ and the caller gets no report to parse. Currently one such spawn:
   an answer: rendered as written. A refusal without its ROUTE is a bare refusal, which
   the methodology forbids.
 - **Never commit into the target repo.** The commit action is explicit, offered at
-  `signed-off` only, and stages that run directory alone.
+  `signed-off` only, and stages that run directory alone. `val/runs/*` is typically
+  **gitignored** — which is why a repo keeps tracked reference runs elsewhere — so the
+  action detects the ignore rule and explains it rather than presenting a button that
+  silently does nothing. Its affirmative path is only reachable in a repo that tracks
+  its runs, so it is tested in a throwaway git repo; that gap is how it once shipped
+  unverified.
 
 ## Known upstream divergences (val-core's, not Studio's)
 
@@ -199,9 +260,41 @@ Studio reads through both rather than normalising them away; the fix belongs ups
   the directory name, so this does not affect it — but it does make `manifest.runId`
   useless as an identifier.
 
-## Not wired
+## Driving a run
 
-`runner/agent-sdk.ts`'s `design()` and `build()` are stubs. The preflight in it is real.
-`StubDesignRunner` replays a recorded run's files into a run directory on a delay,
-which is how the watcher → SSE → screen path is exercised without spending tokens; it
+`AgentSdkRunner` sends `/design <brief>` and `/design build <run-dir>` as **prompt
+text**. Verified: the CLI expands `.claude/commands/design.md` and reports it as
+`UserPromptExpansion { expansion_type: "slash_command", command_name: "design" }`. If
+that hook never fires, the runner fails the run rather than reporting success — the
+prompt reached the model as literal text and everything downstream assumes otherwise.
+
+Four things the SDK makes easy to get wrong, each measured against this repo:
+
+- **cwd propagates to subagent tool calls.** A `PreToolUse` hook carries `cwd` plus
+  `agent_id`/`agent_type` (present only inside a subagent), and all of them report the
+  target repo. Gate 0 check 5 passes and records the comparison in the manifest.
+- **A streaming session does not end at `result`** — it waits for the next user
+  message. The loop must `break` on `result` or it hangs for ever.
+- **The Task tool arrives as `Agent`** in the tool stream, not `Task`.
+- **`q.interrupt()` works mid-subagent** and leaves valid JSON on disk — no torn writes.
+
+`StubDesignRunner` remains: it replays a recorded run's files into a run directory on a
+delay, which exercises the watcher → SSE → screen path without spending tokens. It
 copies `04-approval.md` verbatim, hash included, and never computes a seal.
+
+## A run that stopped, and a run that is merely slow
+
+A killed session leaves `manifest.status` at `running` for ever. Nothing on disk can
+express "abandoned", and **Studio does not write into a run directory to say so** — the
+directory is the pipeline's.
+
+So it is a display fact. `readRunSummary` takes the newest mtime in the directory; a run
+whose status is `running` and which has touched nothing for `--stale-after-ms` (default
+15 minutes) is shown as **stale**, with the time it last did something. The threshold is
+generous on purpose: a concept architect legitimately runs for many minutes, and one
+recorded run in this repo has a stage killed by a watchdog at 600 s. Calling a working
+stage dead is worse than waiting.
+
+Runs Studio started emit `lifecycle: stopped` when stopped or when the backend shuts
+down. A run driven from a terminal cannot be stopped from Studio and is not Studio's to
+stop — `POST /api/runs/:id/stop` says so rather than pretending.
