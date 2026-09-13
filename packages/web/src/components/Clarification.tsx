@@ -92,13 +92,23 @@ export function ClarificationCard({
           <label className="font-mono text-[10px] tracking-wider text-ink-3">
             YOUR ANSWER — saved verbatim to 00-input/answers-&lt;n&gt;.md
           </label>
+          {/*
+            The placeholder is deliberately short. ACCEPTABLE-ANSWER is already rendered
+            above as its own field, and repeating it as ghost text filling the box makes
+            an empty field look like a filled one — which invites sending the pipeline a
+            menu of options where it asked for a decision.
+          */}
           <textarea
             value={answer ?? ""}
             onChange={(e) => onAnswer(e.target.value)}
             rows={3}
-            placeholder={question.acceptableAnswer ?? "a sentence, a decision, or “out of scope”"}
+            placeholder="Your decision, in your own words."
             className="mt-2 w-full resize-y border border-line bg-ground p-2 font-mono text-xs text-ink outline-none focus:border-ink-2"
           />
+          <p className="mt-1 text-[10px] text-ink-3">
+            Answer in your own words — ACCEPTABLE-ANSWER above describes what would unblock this, and is not itself
+            an answer. A blocking question is never defaulted.
+          </p>
         </div>
       )}
     </article>

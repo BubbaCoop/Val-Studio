@@ -22,7 +22,7 @@ import { runFeedbackCheck } from "../src/feedback/check.ts";
 import { readTargetRepo, readValConfig } from "../src/target-repo.ts";
 import { listRuns } from "../src/run/reader.ts";
 import { parseRunKey, resolveRunDir, runKey, runRoots } from "../src/run/roots.ts";
-import { renderBrief } from "../src/inputs.ts";
+import { renderBrief, writeAnswers } from "../src/inputs.ts";
 import { commitAllowed, commitRun } from "../src/git.ts";
 
 const REPO = process.env.VAL_STUDIO_TARGET_REPO ?? "/Users/nicholascooper/Desktop/valiify shortapp library";
@@ -396,5 +396,142 @@ describe("stage derivation is file-driven", () => {
 
   it("always names the evidence for a transition", () => {
     ok(deriveStage({ ...base, hasApproval: true }).because.includes("04-approval.md"));
+  });
+});
+
+maybe("the answer round-trip, against the real blocked run", () => {
+  /**
+   * This path had no coverage, and it showed: the handler wrote the file and never
+   * handed it to the pipeline, so submitting reported success twice while the run sat
+   * untouched. These pin the two halves separately — what lands on disk, and what the
+   * pipeline will read back — because only the first half is Studio's to guarantee.
+   */
+  const temps: string[] = [];
+  after(async () => {
+    for (const t of temps) await rm(t, { recursive: true, force: true });
+  });
+
+  async function scratchRun(from: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "studio-answers-"));
+    temps.push(dir);
+    await cp(from, dir, { recursive: true });
+    return dir;
+  }
+
+  it("writes answers-<n>.md verbatim, numbered, and re-readable by the reader", async () => {
+    const dir = await scratchRun(BLOCKED);
+    const before = await readRunDetail(dir, dir);
+    const question = before.clarifications[0].questions[0];
+    ok(question.blocking, "the fixture's first question is blocking");
+
+    // A real answer: prose the requester typed, punctuation and all.
+    const text = 'Out of scope — documents move to the Applicant Portal (§13). Don\'t compose this step.';
+    const w1 = await writeAnswers(dir, [{ questionId: question.id!, text }]);
+    strictEqual(w1.round, 1);
+    strictEqual(w1.relPath, "00-input/answers-1.md");
+
+    const saved = await readFile(join(dir, w1.relPath), "utf8");
+    ok(saved.includes(text), "the requester's words are saved verbatim, not normalised");
+    ok(saved.includes(`## ${question.id}`), "and attributed to the question they answer");
+
+    // Round numbering continues rather than overwriting: intake reads every
+    // answers-<n>.md and later answers override earlier text.
+    const w2 = await writeAnswers(dir, [{ questionId: question.id!, text: "second thoughts" }]);
+    strictEqual(w2.round, 2);
+    strictEqual(w2.relPath, "00-input/answers-2.md");
+    ok(existsSync(join(dir, "00-input/answers-1.md")), "the first round is never clobbered");
+
+    // The reader sees both, in order, which is what the run screen renders.
+    const after = await readRunDetail(dir, dir);
+    deepStrictEqual(after.answers.map((a) => a.round), [1, 2]);
+    ok(after.answers[0].text.includes(text));
+    // And the questions still parse — writing answers does not disturb 01-brief.md.
+    strictEqual(after.clarifications[0].questions.length, before.clarifications[0].questions.length);
+    strictEqual(after.stage, "blocked-brief", "the stage only moves when a gate rewrites the run");
+  });
+
+  it("keeps each question's fields to itself — no leak across the separator", async () => {
+    /*
+     * The shape a real intake writes: NO fences, a bold `**Q2: …**` title, and a `---`
+     * rule between questions. The tracked fixture fences its blocks and has no rules at
+     * all, so asserting against the fixture could never catch this — it passed happily
+     * while the bug was live. The text below is the observed format, trimmed.
+     */
+    const brief = [
+      "# Brief — business-documents",
+      "",
+      "## Open questions",
+      "",
+      "### BLOCKING",
+      "",
+      "**Q1: File upload is not a supported archetype**",
+      "",
+      "Q: §2 lists eight archetypes and none of them is a file-upload step. How should",
+      "document upload be composed on this surface?",
+      "",
+      "TRIGGER: `archetype-not-in-§2`",
+      "",
+      "NEEDED-FOR: The entire step.",
+      "",
+      "CHECKED: §2 Archetypes; §10 Component map.",
+      "",
+      "COST-OF-GUESSING: Inventing an upload slot means inventing a component.",
+      "",
+      'ACCEPTABLE-ANSWER: One of: (1) "out of scope", or (2) a §12 planned addition.',
+      "",
+      "---",
+      "",
+      "**Q2: Upload progress state is unspecified**",
+      "",
+      'Q: What should display during file upload?',
+      "",
+      "TRIGGER: `§13-open-item`",
+      "",
+      "NEEDED-FOR: The uploading state row.",
+      "",
+      "CHECKED: §6 State handling; §13 Open items.",
+      "",
+      "COST-OF-GUESSING: A spinner gives no feedback on transfer progress.",
+      "",
+      'ACCEPTABLE-ANSWER: A decision on what displays during upload.',
+      "",
+      "---",
+      "",
+      "### NON-BLOCKING",
+      "",
+      "None.",
+      "",
+      "## Methodology rules applied",
+      "",
+      "- §2 Archetypes — checked.",
+      "",
+    ].join("\n");
+
+    const round = parseOpenQuestions(brief, { gate: 1, origin: "brief", source: "01-brief.md" })!;
+    strictEqual(round.questions.length, 2, "two questions, not one absorbed into the other");
+
+    const [q1, q2] = round.questions;
+    // The exact leak that was live: the LAST field swallowed the rule and the next title.
+    strictEqual(q1.acceptableAnswer, 'One of: (1) "out of scope", or (2) a §12 planned addition.');
+    strictEqual(q2.acceptableAnswer, "A decision on what displays during upload.");
+    // And the trailing rule before ### NON-BLOCKING does not ride along either.
+    ok(!/-{3,}/.test(q2.acceptableAnswer!));
+
+    for (const q of round.questions) {
+      for (const field of [q.question, q.neededFor, q.checked, q.costOfGuessing, q.acceptableAnswer]) {
+        if (!field) continue;
+        ok(!/-{3,}/.test(field), `${q.id}: absorbed a --- separator: ${field.slice(-60)}`);
+        ok(!/\*\*Q\d+/.test(field), `${q.id}: absorbed the next question's title: ${field.slice(-60)}`);
+        ok(!/^#{1,6}\s/m.test(field), `${q.id}: absorbed a heading: ${field.slice(-60)}`);
+      }
+    }
+  });
+
+  it("still parses the fenced shape the tracked fixture uses", async () => {
+    // Both formats are in the wild. Neither may regress for the other's sake.
+    const dir = await scratchRun(BLOCKED);
+    const d = await readRunDetail(dir, dir);
+    strictEqual(d.clarifications[0].questions.length, 2);
+    strictEqual(d.clarifications[0].questions[0].trigger, "archetype-not-in-§2");
   });
 });

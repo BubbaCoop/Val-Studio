@@ -181,7 +181,17 @@ Three things follow, and they are load-bearing:
 ## What a run is allowed to do
 
 Confinement is Studio's, not the operator's. `runner/policy.ts` is enforced in a
-**PreToolUse hook**, and that choice is forced by two measured facts:
+**PreToolUse hook** under `permissionMode: "bypassPermissions"`, and that choice is
+forced by three measured facts:
+
+- **Studio has to be its own approval surface.** Dropping the operator's settings also
+  drops the grants that were silently authorising every write. With `project` alone
+  there is no Write/Edit rule and nothing to prompt, so every write came back *"you
+  haven't granted it yet"* — and the run narrated a success it had not performed.
+  `bypassPermissions` turns the settings-based checks off so the hook decides
+  everything; the hook denies by default, so this tightens rather than loosens.
+  The SDK says so itself: *"canUseTool will not be invoked … To gate every tool call,
+  use a PreToolUse hook instead."* There is deliberately no `canUseTool` here.
 
 - `canUseTool` is **never consulted** once `settingSources` loads filesystem settings —
   every tool, Bash included, is auto-allowed by whatever the operator has in
@@ -251,6 +261,17 @@ and the caller gets no report to parse. Currently one such spawn:
 
 Studio reads through both rather than normalising them away; the fix belongs upstream.
 
+- The clarification format varies between runs. One intake wrote fenced blocks with
+  bare `TRIGGER: archetype-not-in-§2`; another wrote unfenced blocks with bold
+  `**Q1: …**` titles, `---` separators and backticked ``TRIGGER: `archetype-not-in-§2` ``.
+  The parser reads both and treats a rule, a bold question title or a heading as a field
+  boundary — without which the last field of each question swallowed the separator and
+  the next question's title.
+- An answered clarification keeps its questions under `### BLOCKING`, retitled
+  `**Q1: … — ANSWERED**`, and the run takes statuses outside the template's vocabulary
+  (`blocked-test-fixture`, gate status `blocked-answered`). Studio reports what is
+  written and does not infer "answered" from a title suffix, so such a run still reads
+  as `blocked-brief`.
 - The critic writes two verdict formats. `design.template.md` specifies
   `CRITIQUE: PASS | FINDINGS: n | BLOCKING: n`; some runs open with a prose
   `**VERDICT: PASS** — …` and put the machine line at the bottom. `verdictOf()` accepts
@@ -281,6 +302,29 @@ Four things the SDK makes easy to get wrong, each measured against this repo:
 `StubDesignRunner` remains: it replays a recorded run's files into a run directory on a
 delay, which exercises the watcher → SSE → screen path without spending tokens. It
 copies `04-approval.md` verbatim, hash included, and never computes a seal.
+
+## Answering a blocked brief
+
+Writing `00-input/answers-<n>.md` is **not** the same as handing it to the pipeline.
+Gate 1 ends its turn at `awaiting-requester`, so by the time answers arrive the session
+that asked the questions is over — and `/design` has no resume entry point
+(`/design <brief>` and `/design build <run-dir>` are the only two).
+
+So the answers endpoint **resumes the SDK session** that asked, which restores the
+orchestrator's own Clarification-protocol context and lets its step 4 ("re-invoke the
+stage that asked") still apply. Verified end to end: the resumed session read the
+answers, updated the manifest and re-dispatched `design-brief-intake`.
+
+Session ids are held **in memory**. They are Studio's fact about its own process, not
+the run's, and writing them into the run directory would put Studio's bookkeeping in a
+tree the pipeline owns. The cost: a Studio restart, or a run driven from a terminal,
+leaves nothing to resume. In that case the endpoint **refuses and says why** rather
+than starting a fresh `/design` that has never seen the questions — a 200 with
+`resumed: false` and a reason the UI renders, never a silent success.
+
+This path shipped once with the file write and no re-invocation at all: two submissions
+produced two answers files, two "success" responses, and a run that never moved. Its
+round-trip is now tested.
 
 ## A run that stopped, and a run that is merely slow
 

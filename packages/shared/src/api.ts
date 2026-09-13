@@ -85,6 +85,25 @@ export interface SubmitAnswersRequest {
   note?: string;
 }
 
+/**
+ * What `POST /api/runs/:runId/answers` returns.
+ *
+ * `resumed` is the part that matters: writing the file is not the same as handing it
+ * to the pipeline. Gate 1 ended its turn, so the answers reach the orchestrator only by
+ * resuming the session that asked — and when there is none, the client must say so
+ * rather than report a success that did nothing.
+ */
+export interface SubmitAnswersResponse {
+  round: number;
+  relPath: string;
+  absPath: string;
+  /** True when a session was resumed and the pipeline is running again. */
+  resumed: boolean;
+  /** Why it was not resumed. Rendered verbatim. */
+  reason?: string;
+  run: RunDetail;
+}
+
 /** `POST /api/runs/:runId/feedback` — a Gate 4a round from the concept composer. */
 export interface SubmitFeedbackRequest {
   /**

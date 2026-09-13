@@ -44,6 +44,18 @@ export interface RunnerInvocation {
   ctx: RunnerContext;
   onProgress?: (p: RunnerProgress) => void;
   signal?: AbortSignal;
+  /**
+   * Resume this SDK session instead of starting a new one.
+   *
+   * A clarification round needs it. Gate 1 ENDS ITS TURN at `awaiting-requester`, so by
+   * the time answers arrive the session that asked is over — and `/design` has no
+   * resume entry point (`/design <brief>` and `/design build <run-dir>` are the only
+   * two). Resuming the session restores the orchestrator's own Clarification protocol
+   * context, which is what lets step 4 ("re-invoke the stage that asked") still apply.
+   */
+  resume?: string;
+  /** The SDK session id, reported as soon as it exists, so a later round can resume it. */
+  onSession?: (sessionId: string) => void;
 }
 
 /** What a run cost. Reported so the floor stays visible — it is not small. */

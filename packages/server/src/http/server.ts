@@ -18,6 +18,7 @@ import type {
   CreateRunResponse,
   PreflightResult,
   SubmitAnswersRequest,
+  SubmitAnswersResponse,
   SubmitFeedbackRequest,
   SubmitFeedbackResponse,
 } from "@valiify/studio-shared";
@@ -70,6 +71,17 @@ export function createStudioServer(deps: StudioServerDeps) {
    * Studio does not write into the run directory to say so.
    */
   const inFlight = new Map<string, AbortController>();
+
+  /**
+   * The SDK session that last drove each run, so a clarification round can resume it.
+   *
+   * In memory on purpose. The session id is Studio's fact about its own process, not
+   * the run's — writing it into the run directory would put Studio's bookkeeping in a
+   * tree the pipeline owns. The cost is that a restart, or a run someone drove from a
+   * terminal, leaves nothing to resume; the answers endpoint says so rather than
+   * firing a fresh session that has never seen the questions.
+   */
+  const sessions = new Map<string, string>();
 
   /** The configured roots, re-read so a config edited underneath Studio is picked up. */
   async function roots(): Promise<RunRoot[]> {
@@ -235,7 +247,15 @@ export function createStudioServer(deps: StudioServerDeps) {
         if (!payload.answers?.length) return void fail(res, 400, "No answers supplied");
         // Verbatim — this is what the pipeline re-reads.
         const written = await writeAnswers(dir, payload.answers, payload.note);
-        return void json(res, 200, { ...written, run: await readRunDetail(config.targetRepo, dir, root, config.staleAfterMs) });
+        const resumed = await resumeWithAnswers(runId, dir, written.relPath);
+        const response: SubmitAnswersResponse = {
+          ...written,
+          ...resumed,
+          run: await readRunDetail(config.targetRepo, dir, root, config.staleAfterMs),
+        };
+        // 202 when the pipeline is running again; 200 when the file landed and nothing
+        // is driving it, which the client renders rather than reporting plain success.
+        return void json(res, resumed.resumed ? 202 : 200, response);
       }
 
       if (rest[0] === "feedback" && req.method === "POST") {
@@ -275,6 +295,74 @@ export function createStudioServer(deps: StudioServerDeps) {
     }
 
     return void fail(res, 404, "Not found");
+  }
+
+  /**
+   * Hand the answers back to the pipeline.
+   *
+   * Gate 1 END ITS TURN at `awaiting-requester`, so the session that asked the
+   * questions is over, and `/design` has no resume entry point — `/design <brief>` and
+   * `/design build <run-dir>` are the only two. Resuming the SDK session restores the
+   * orchestrator's own Clarification-protocol context, which is what makes its step 4
+   * ("re-invoke the stage that asked") still apply.
+   *
+   * With no session to resume, this REFUSES rather than starting a fresh `/design`:
+   * a new session has never seen the questions, and Gate 0 is not documented for a run
+   * directory that already exists. Saying so beats a second silent no-op.
+   */
+  async function resumeWithAnswers(
+    runId: string,
+    dir: string,
+    answersRelPath: string,
+  ): Promise<{ resumed: boolean; reason?: string }> {
+    const session = sessions.get(runId);
+    if (!session) {
+      return {
+        resumed: false,
+        reason:
+          `The answers are saved to ${answersRelPath}, but Studio has no session to hand them to. ` +
+          `A clarification round is resumed by resuming the session that asked the questions, and that session ` +
+          `belongs to the Studio process that started the run — it is lost on restart, and never exists for a run ` +
+          `driven from a terminal. /design has no resume entry point to fall back on, so re-running it would start ` +
+          `a session that has never seen the questions. Continue this run from the terminal that started it, or ` +
+          `re-run /design from Studio.`,
+      };
+    }
+    if (inFlight.has(runId)) {
+      return { resumed: false, reason: "A session is already driving this run; wait for it to finish." };
+    }
+
+    const prompt =
+      `The requester has answered the blocking questions. Their answers are saved verbatim at ` +
+      `${answersRelPath} in ${relative(config.targetRepo, dir)}.\n\n` +
+      `Continue from the Clarification protocol: clear the pause and proceed from the gate that raised them.`;
+
+    const ctl = new AbortController();
+    inFlight.set(runId, ctl);
+    channels.lifecycle(runId, "started", { command: `resume ${session} — ${answersRelPath}` });
+    void runner
+      .design({
+        prompt,
+        // Same bounds as the original run: Gate 0 named the directory, not Studio.
+        ctx: {
+          targetRepo: config.targetRepo,
+          runDir: dir,
+          runRelPath: relative(config.targetRepo, dir),
+          runId,
+          writeRoots: [resolve(config.targetRepo, (await roots())[0].relDir), resolve(config.targetRepo, BRIEFS_DIR)],
+        },
+        resume: session,
+        onSession: (id) => sessions.set(runId, id),
+        onProgress: (p) => channels.progress(runId, p),
+        signal: ctl.signal,
+      })
+      .then((r) => finish(runId, prompt, r))
+      .catch((e) => {
+        inFlight.delete(runId);
+        channels.lifecycle(runId, "failed", { command: prompt, error: (e as Error).message });
+      });
+
+    return { resumed: true };
   }
 
   /**
@@ -337,6 +425,7 @@ export function createStudioServer(deps: StudioServerDeps) {
       .design({
         prompt,
         ctx: { targetRepo: config.targetRepo, runDir: join(config.targetRepo, runRelPath), runRelPath, runId, writeRoots },
+        onSession: (id) => sessions.set(runId, id),
         onProgress: (p) => channels.progress(runId, p),
         signal: ctl.signal,
       })
@@ -412,6 +501,7 @@ export function createStudioServer(deps: StudioServerDeps) {
       .build({
         prompt,
         ctx: { targetRepo: config.targetRepo, runDir: dir, runRelPath, runId, writeRoots: [dir] },
+        onSession: (id) => sessions.set(runId, id),
         onProgress: (p) => channels.progress(runId, p),
         signal: ctl.signal,
       })

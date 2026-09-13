@@ -18,9 +18,21 @@
  *                  and NOT the operator's personal ~/.claude/settings.json. A run
  *                  driven by Studio is confined by Studio, not by whatever the operator
  *                  happens to have approved for themselves.
- *   confinement    a PreToolUse hook, because `canUseTool` is never consulted once
- *                  filesystem settings are loaded. The hook's deny overrides an
- *                  inherited allow.
+ *   approval       Studio is the ONLY approval surface, and it has to be an explicit
+ *                  one. Dropping the operator's settings also dropped the grants that
+ *                  were silently authorising every write: with `project` alone there is
+ *                  no rule permitting Write or Edit, no `canUseTool`, and nothing to
+ *                  prompt — so every write came back "you haven't granted it yet" and
+ *                  the run narrated a success it had not performed. `bypassPermissions`
+ *                  turns the settings-based checks off; the PreToolUse hook below then
+ *                  decides everything, which is the intended design rather than a
+ *                  loosening of it. The hook denies by default, so an unknown tool is
+ *                  still refused.
+ *   confinement    a PreToolUse hook, and ONLY that. There is deliberately no
+ *                  `canUseTool` here: under `bypassPermissions` the SDK warns
+ *                  "canUseTool will not be invoked … To gate every tool call, use a
+ *                  PreToolUse hook instead", so a callback would be dead code that
+ *                  warns on every run while reading like a second line of defence.
  *   loop exit      a streaming session does NOT end at `result` — it waits for the next
  *                  user message. The loop breaks on `result` explicitly, or it hangs.
  */
@@ -105,7 +117,11 @@ export class AgentSdkRunner implements DesignRunner {
         cwd: inv.ctx.targetRepo,
         // Project only: the repo's agents and commands, never the operator's settings.
         settingSources: ["project"],
+        // Studio decides, in the hook below. Without this the run cannot write at all.
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
         ...(this.model ? { model: this.model } : {}),
+        ...(inv.resume ? { resume: inv.resume } : {}),
         hooks: {
           // Proof that the command file expanded rather than reaching the model as text.
           UserPromptExpansion: [
@@ -175,6 +191,11 @@ export class AgentSdkRunner implements DesignRunner {
 
     try {
       for await (const msg of q) {
+        if (msg.type === "system" && msg.subtype === "init") {
+          // Recorded so a clarification round can resume THIS session rather than
+          // starting a new one that has never seen the questions.
+          inv.onSession?.(msg.session_id);
+        }
         if (msg.type === "assistant") {
           for (const block of (msg.message.content ?? []) as { type: string; text?: string }[]) {
             if (block.type === "text" && block.text) {
@@ -207,7 +228,7 @@ export class AgentSdkRunner implements DesignRunner {
     if (inv.signal?.aborted) {
       return { ok: false, error: "stopped by the operator", finalText: finalText.trim() || undefined, usage, refusals };
     }
-    if (!dispatched && !errored) {
+    if (!dispatched && !errored && !inv.resume) {
       // The command file did not expand. Everything downstream assumes it did, so this
       // is reported as a failure rather than passed off as a finished run.
       return {

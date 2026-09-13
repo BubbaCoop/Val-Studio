@@ -27,6 +27,17 @@ const KEYS = [
 const KEY_RE = new RegExp(`^\\s*(${KEYS.map(([k]) => k).join("|")})\\s*:\\s*(.*)$`);
 
 /**
+ * A line that ends a question, whatever follows it.
+ *
+ * Real intake output separates questions with a horizontal rule and titles them with a
+ * bold heading (`**Q2: Upload progress state is unspecified**`) rather than a markdown
+ * `#` heading. Neither is a key line, so without this the LAST field of each question —
+ * usually ACCEPTABLE-ANSWER — swallowed the rule and the next question's title. The
+ * tracked fixture fences its blocks, which is why this never showed there.
+ */
+const BOUNDARY_RE = /^\s*(?:-{3,}|\*{3,}|_{3,}|\*\*Q\d+\b|#{1,6}\s)/;
+
+/**
  * Parse one clarification block. Continuation lines belong to the key above them,
  * which is how the real fixtures wrap a long Q or COST-OF-GUESSING across lines.
  */
@@ -39,6 +50,12 @@ export function parseClarificationBlock(raw: string, blocking: boolean): Clarifi
       const key = KEYS.find(([k]) => k === m[1])![1];
       current = key;
       out[key] = [m[2]];
+      continue;
+    }
+    // A separator or the next question's title ends the current field. Continuation
+    // lines belong to the key above them only until the question itself ends.
+    if (BOUNDARY_RE.test(line)) {
+      current = null;
       continue;
     }
     if (current && line.trim()) out[current].push(line.trim());
@@ -82,7 +99,9 @@ function looseBlocks(body: string): string[] {
       continue;
     }
     if (buf) {
-      if (/^#{1,6}\s/.test(line)) {
+      // Close the block at a separator or the next question's title, so the trailing
+      // field does not absorb them.
+      if (BOUNDARY_RE.test(line)) {
         out.push(buf.join("\n"));
         buf = null;
         continue;

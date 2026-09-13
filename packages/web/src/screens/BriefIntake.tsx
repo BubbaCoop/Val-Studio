@@ -163,9 +163,13 @@ export function BlockedBrief({
           onClick={async () => {
             setBusy(true);
             try {
-              await api.answers(run.runId, {
+              const res = await api.answers(run.runId, {
                 answers: Object.entries(answers).map(([questionId, text]) => ({ questionId, text })),
               });
+              // Writing the file is not the same as handing it to the pipeline. When
+              // nothing picked it up, say so — this action reported plain success twice
+              // while the run sat untouched.
+              if (!res.resumed) onError?.(res.reason ?? "The answers were saved, but no session picked them up.");
               onSubmitted();
             } catch (e) {
               onError?.((e as Error).message);

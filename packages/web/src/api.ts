@@ -15,6 +15,7 @@ import type {
   RunListResponse,
   StudioHealth,
   SubmitAnswersRequest,
+  SubmitAnswersResponse,
   SubmitFeedbackRequest,
   SubmitFeedbackResponse,
   TargetRepoInfo,
@@ -54,8 +55,17 @@ export const api = {
   runs: () => req<RunListResponse>("/api/runs"),
   run: (runId: string) => req<RunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
   createRun: (body: CreateRunRequest) => post<CreateRunResponse>("/api/runs", body),
-  answers: (runId: string, body: SubmitAnswersRequest) =>
-    post<{ round: number; relPath: string; run: RunDetail }>(`/api/runs/${encodeURIComponent(runId)}/answers`, body),
+  /** 202 = resumed and running again; 200 = the file landed but nothing picked it up. */
+  answers: async (runId: string, body: SubmitAnswersRequest): Promise<SubmitAnswersResponse> => {
+    const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}/answers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const parsed = await res.json();
+    if (res.status === 200 || res.status === 202) return parsed as SubmitAnswersResponse;
+    throw new ApiError(res.status, parsed?.error ?? res.statusText, parsed?.detail);
+  },
   /** Validates through val-core's feedback-check; a FAIL comes back as a 422 body, not a throw. */
   feedback: async (runId: string, body: SubmitFeedbackRequest): Promise<SubmitFeedbackResponse> => {
     const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}/feedback`, {
