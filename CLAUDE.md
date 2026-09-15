@@ -239,6 +239,21 @@ and the caller gets no report to parse. Currently one such spawn:
 
 ## Standing rules
 
+- **Verify against the artifact, never the report.** A run that says it wrote a file,
+  a check that says it passed, an agent that narrates a finished gate — none of those is
+  evidence. The evidence is the file's mtime, its contents, the exit code, the row on
+  disk. This rule is not theoretical: a runner change once removed the permission grants
+  that were authorising every write, and the pipeline reported `ok` through an entire
+  run in which **nothing on disk changed**, because the model's narration was taken for
+  the outcome. The run directory is the source of truth for exactly this reason — apply
+  the same standard to Studio's own work.
+- **If a test cannot fail when the thing it tests is reverted, it is not a test.**
+  Prove it: break the code, watch the test go red, restore it, watch it go green. Two
+  tests shipped here that could never fail — a leak test asserting against a fixture
+  whose format could not exhibit the leak, and a commit test that never reached the
+  affirmative path because the directory was gitignored. Both passed happily while the
+  bug was live. A guard gets the same treatment: the deny hook is proven by removing it
+  and watching the forbidden write land.
 - **A tool's false positive is a tool bug.** If `class-audit`, `handoff-check` or
   `feedback-check` flags something that is in fact correct, fix the tool and add a test
   for the case. Never bend working library code, a methodology, or a concept to satisfy
@@ -261,6 +276,11 @@ and the caller gets no report to parse. Currently one such spawn:
 
 Studio reads through both rather than normalising them away; the fix belongs upstream.
 
+- **Pin the clarification block format and assert it in val-core's own test suite.**
+  This is the one to fix first, because it is the only divergence that compounds:
+  Studio reading both shapes is a workaround that grows a parser branch per divergence,
+  and the field-leak bug is what that already cost. Intake should not be able to emit a
+  third shape. The rest of this list is reporting; this is prevention.
 - The clarification format varies between runs. One intake wrote fenced blocks with
   bare `TRIGGER: archetype-not-in-§2`; another wrote unfenced blocks with bold
   `**Q1: …**` titles, `---` separators and backticked ``TRIGGER: `archetype-not-in-§2` ``.

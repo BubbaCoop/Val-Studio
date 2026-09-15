@@ -228,7 +228,10 @@ export class AgentSdkRunner implements DesignRunner {
     if (inv.signal?.aborted) {
       return { ok: false, error: "stopped by the operator", finalText: finalText.trim() || undefined, usage, refusals };
     }
-    if (!dispatched && !errored && !inv.resume) {
+    // Only a prompt that IS a slash command can fail to expand. A resume continuation
+    // and any other prose prompt are not commands and must not be judged as one.
+    const sentACommand = inv.prompt.trimStart().startsWith("/");
+    if (sentACommand && !dispatched && !errored) {
       // The command file did not expand. Everything downstream assumes it did, so this
       // is reported as a failure rather than passed off as a finished run.
       return {
