@@ -12,7 +12,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.269",
     "@valiify/studio-shared": "*",
-    "@valiify/val-core": "^0.4.0"
+    "@valiify/val-core": "^0.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2"
